@@ -7,6 +7,8 @@ analysis/
 # Allow example output data
 !examples/*/data/
 !examples/*/data/*.csv
+!examples/*/data/raw/
+!examples/*/data/raw/*.csv
 .vscode/
 .idea/
 # config.py is published (no secrets — only public endpoints and free app IDs)

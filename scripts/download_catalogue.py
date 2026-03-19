@@ -2,7 +2,7 @@
 Download Catalogue Resources
 =============================
 Reads CSVs from data/catalogue/, identifies downloadable URLs,
-and downloads selected files to data/raw/.
+and downloads selected files to data/downloads/.
 
 Works with catalogue files produced by fetch_country_data.py:
 - impact_all_resources.csv    → direct XLSX/PDF links (repository.impact-initiatives.org)
@@ -17,13 +17,13 @@ Currently supports direct-download URLs only (IMPACT, DTM resources).
 HDX datasets require a separate resolution step via CKAN API (future).
 
 Usage (standalone):
-    python -X utf8 download_catalogue.py --catalogue-dir data/catalogue/ --output-dir data/raw/downloads/
+    python -X utf8 download_catalogue.py --catalogue-dir data/catalogue/ --output-dir data/downloads/
     python -X utf8 download_catalogue.py --catalogue-dir data/catalogue/ --source impact --dry-run
-    python -X utf8 download_catalogue.py --catalogue-dir data/catalogue/ --filter msna --output-dir data/raw/msna/
+    python -X utf8 download_catalogue.py --catalogue-dir data/catalogue/ --filter msna --output-dir data/downloads/msna/
 
 Usage (as library):
     from download_catalogue import download_from_catalogue
-    results = download_from_catalogue('data/catalogue/', 'data/raw/downloads/')
+    results = download_from_catalogue('data/catalogue/', 'data/downloads/')
 
 License: MIT
 """
@@ -384,7 +384,7 @@ def download_from_catalogue(catalogue_dir, output_dir,
 def update_inventory(data_dir):
     """Rebuild data_inventory.csv by scanning all files in data/.
 
-    Scans raw/, raw/downloads/, catalogue/ and any other subdirs.
+    Scans raw/, downloads/, catalogue/ and any other subdirs.
     Produces one row per file with: file, source, category, records, size_bytes, directory.
     """
     INVENTORY_FIELDS = [
@@ -401,10 +401,12 @@ def update_inventory(data_dir):
         # Determine category from directory name
         if subdir == 'catalogue':
             category = 'catalogue'
+        elif subdir == 'downloads':
+            category = 'downloads'
         else:
-            category = 'analytical'
+            category = 'raw'
 
-        # Scan files (including subdirectories like raw/downloads/)
+        # Scan files (including subdirectories)
         for root, dirs, files in os.walk(dirpath):
             for fname in sorted(files):
                 if not fname.endswith(('.csv', '.xlsx', '.xls', '.zip', '.json', '.geojson', '.pdf')):
@@ -458,8 +460,8 @@ def main():
         description='Download resources listed in data/catalogue/ CSVs')
     parser.add_argument('--catalogue-dir', default='data/catalogue/',
                         help='Catalogue directory (default: data/catalogue/)')
-    parser.add_argument('--output-dir', default='data/raw/downloads/',
-                        help='Download target (default: data/raw/downloads/)')
+    parser.add_argument('--output-dir', default='data/downloads/',
+                        help='Download target (default: data/downloads/)')
     parser.add_argument('--source', help='Filter by source (e.g., impact, dtm)')
     parser.add_argument('--filter', dest='filter_text',
                         help='Filter by keyword in title/URL (e.g., msna, disability)')

@@ -33,7 +33,7 @@ python -X utf8 01b_download.py --select
 python -X utf8 01b_download.py
 ```
 
-Step 1 creates `UKR_data/` with analytical CSVs and a `catalogue/` subfolder listing available datasets with URLs. Step 2 lets you browse that catalogue and pick which ones to actually download — arrow keys to navigate, space to toggle, enter to confirm. Downloaded files go to `UKR_data/raw/` and are marked with `x` in the catalogue CSV.
+Step 1 creates `UKR_data/` with a `raw/` subfolder (data from APIs — conflict events, displacement, food security, etc.) and a `catalogue/` subfolder (dataset listings with download URLs). Step 2 lets you browse that catalogue and pick which datasets to actually download — arrow keys to navigate, space to toggle, enter to confirm. Downloaded files go to `UKR_data/downloads/` and are marked with `x` in the catalogue CSV.
 
 Sample output is included in `examples/ukraine/data/`.
 
@@ -83,11 +83,12 @@ scripts/
 
 {ISO3}_data/                       # output (created automatically, one per country)
 ├── data_inventory.csv             # index of all files
-├── liveuamap_events.csv           # analytical CSVs
-├── fetch_summary.csv
-├── catalogue/                     # dataset listings with URLs
+├── raw/                           # data from APIs (conflict events, displacement, etc.)
+│   ├── liveuamap_events.csv
+│   └── hapi_idps.csv
+├── catalogue/                     # dataset listings with download URLs
 │   └── impact_all_resources.csv
-└── raw/                           # downloaded files
+└── downloads/                     # datasets downloaded from the catalogue
     └── REACH_UKR_MSNA.xlsx
 
 examples/

@@ -47,25 +47,25 @@ ALL_SOURCES = [
 SCRIPT_DIR = os.path.dirname(os.path.abspath(__file__))
 PROJECT_DIR = os.path.dirname(SCRIPT_DIR)
 
-# Source categories: catalogue (listings to review) vs analytical (exploitable data)
+# Source categories: catalogue (dataset listings with URLs) vs raw (exploitable data)
 SOURCE_CATEGORIES = {
     'reliefweb': 'catalogue',   # Listings of reports (not the content)
-    'hapi': 'analytical',
+    'hapi': 'raw',
     'hdx': 'catalogue',
-    'idmc': 'analytical',
-    'unhcr': 'analytical',
-    'inform': 'analytical',     # Risk scores = exploitable data
-    'wfp': 'analytical',
-    'worldbank': 'analytical',  # Indicators = exploitable data
-    'acled': 'analytical',
-    'acaps': 'analytical',
+    'idmc': 'raw',
+    'unhcr': 'raw',
+    'inform': 'raw',     # Risk scores = exploitable data
+    'wfp': 'raw',
+    'worldbank': 'raw',  # Indicators = exploitable data
+    'acled': 'raw',
+    'acaps': 'raw',
     'dtm': 'catalogue',
-    'gdacs': 'analytical',
-    'hpc': 'analytical',
-    'ifrcgo': 'analytical',
+    'gdacs': 'raw',
+    'hpc': 'raw',
+    'ifrcgo': 'raw',
     'impact': 'catalogue',
     'dtm_portal': 'catalogue',
-    'liveuamap': 'analytical',
+    'liveuamap': 'raw',
 }
 
 CATALOGUE_SOURCES = {k for k, v in SOURCE_CATEGORIES.items() if v == 'catalogue'}
@@ -86,10 +86,6 @@ SOURCE_DISPLAY_NAMES = {
     'liveuamap': 'Liveuamap',
 }
 
-SUMMARY_FIELDS = [
-    'source', 'category', 'total_records', 'disability_records',
-    'period_from', 'period_to', 'last_update', 'files', 'note',
-]
 
 
 def _extract_date_range(records, date_field='date_start'):
@@ -152,11 +148,11 @@ def build_inventory(summaries, raw_dir, catalogue_dir=None):
     summary_by_source = {s['source']: s for s in summaries}
 
     inventory = []
-    for directory, dir_label in [(raw_dir, 'analytical'), (catalogue_dir, 'catalogue')]:
+    for directory, dir_label in [(raw_dir, 'raw'), (catalogue_dir, 'catalogue')]:
         if not directory or not os.path.isdir(directory):
             continue
         for fname in sorted(os.listdir(directory)):
-            if not fname.endswith('.csv') or fname in ('fetch_summary.csv', 'data_inventory.csv'):
+            if not fname.endswith('.csv') or fname == 'data_inventory.csv':
                 continue
             fpath = os.path.join(directory, fname)
             size = os.path.getsize(fpath)
@@ -449,7 +445,7 @@ def fetch_hapi(iso3, output_dir, date_from=None, date_to=None):
     p_to = max(clean_dates) if clean_dates else ''
 
     return _make_result(
-        source='HDX HAPI', category='analytical',
+        source='HDX HAPI', category='raw',
         total_records=total,
         disability_records=disability_records,
         period_from=p_from, period_to=p_to,
@@ -546,7 +542,7 @@ def fetch_idmc(iso3, output_dir, date_from=None):
     p_from, p_to = _extract_date_range(events, 'start_date') if events else ('', '')
     stock = overview.get('total_stock', 0) if overview else 0
     return _make_result(
-        source='IDMC', category='analytical',
+        source='IDMC', category='raw',
         total_records=total,
         disability_records=0,
         period_from=p_from, period_to=p_to,
@@ -590,7 +586,7 @@ def fetch_unhcr(iso3, output_dir, date_from=None):
     p_to = max(years) if years else ''
 
     return _make_result(
-        source='UNHCR', category='analytical',
+        source='UNHCR', category='raw',
         total_records=total,
         disability_records=0,
         period_from=p_from, period_to=p_to,
@@ -615,7 +611,7 @@ def fetch_inform(iso3, output_dir):
     except Exception as e:
         print('  INFORM API temporarily unavailable: {}'.format(e))
         return _make_result(
-            source='INFORM', category='analytical',
+            source='INFORM', category='raw',
             total_records=0, disability_records=0,
             note='API temporarily unavailable (JRC restructuring)',
         )
@@ -642,7 +638,7 @@ def fetch_inform(iso3, output_dir):
         total += len(subnational)
 
     return _make_result(
-        source='INFORM', category='analytical',
+        source='INFORM', category='raw',
         total_records=total,
         disability_records=0,
         files=files,
@@ -678,7 +674,7 @@ def fetch_wfp(iso3, output_dir):
         total += len(subnational)
 
     return _make_result(
-        source='WFP HungerMap', category='analytical',
+        source='WFP HungerMap', category='raw',
         total_records=total,
         disability_records=0,
         files=files,
@@ -703,7 +699,7 @@ def fetch_worldbank(iso3, output_dir):
     info = wb.get_country_info(iso3)
 
     return _make_result(
-        source='World Bank', category='analytical',
+        source='World Bank', category='raw',
         total_records=len(profile),
         disability_records=0,
         files=['worldbank_profile.csv'] if profile else [],
@@ -722,7 +718,7 @@ def fetch_acled(iso3, output_dir, date_from=None, date_to=None):
     except ValueError as e:
         print('  SKIPPED: {}'.format(e))
         return _make_result(
-            source='ACLED', category='analytical',
+            source='ACLED', category='raw',
             total_records=0, disability_records=0,
             note='Skipped — no API key',
         )
@@ -758,7 +754,7 @@ def fetch_acled(iso3, output_dir, date_from=None, date_to=None):
     p_from, p_to = _extract_date_range(events, 'event_date') if events else ('', '')
 
     return _make_result(
-        source='ACLED', category='analytical',
+        source='ACLED', category='raw',
         total_records=len(events) + cast_count,
         disability_records=0,
         period_from=p_from, period_to=p_to,
@@ -795,7 +791,7 @@ def fetch_acaps(iso3, output_dir):
 
     sev_class = severity[0].get('severity_class', 'N/A') if severity else 'N/A'
     return _make_result(
-        source='ACAPS', category='analytical',
+        source='ACAPS', category='raw',
         total_records=total,
         disability_records=0,
         files=files,
@@ -862,7 +858,7 @@ def fetch_gdacs(iso3, output_dir, date_from=None):
     red = sum(1 for a in alerts if a['alert_level'] == 'Red')
     orange = sum(1 for a in alerts if a['alert_level'] == 'Orange')
     return _make_result(
-        source='GDACS', category='analytical',
+        source='GDACS', category='raw',
         total_records=len(alerts),
         disability_records=0,
         period_from=p_from, period_to=p_to,
@@ -903,7 +899,7 @@ def fetch_hpc(iso3, output_dir, date_from=None):
     p_from, p_to = _extract_date_range(flows, 'flow_date') if flows else ('', '')
     total_funding = sum(float(f.get('amount_usd', 0) or 0) for f in flows)
     return _make_result(
-        source='HPC/FTS', category='analytical',
+        source='HPC/FTS', category='raw',
         total_records=total,
         disability_records=0,
         period_from=p_from, period_to=p_to,
@@ -958,7 +954,7 @@ def fetch_ifrcgo(iso3, output_dir):
 
     p_from, p_to = _extract_date_range(events, 'date_start') if events else ('', '')
     return _make_result(
-        source='IFRC Go', category='analytical',
+        source='IFRC Go', category='raw',
         total_records=total,
         disability_records=0,
         period_from=p_from, period_to=p_to,
@@ -1075,7 +1071,7 @@ def fetch_liveuamap(iso3, output_dir, date_from=None, date_to=None, max_pages=20
 
     p_from, p_to = _extract_date_range(events, 'datetime') if events else ('', '')
     return _make_result(
-        source='Liveuamap', category='analytical',
+        source='Liveuamap', category='raw',
         total_records=len(events),
         disability_records=0,
         period_from=p_from, period_to=p_to,
@@ -1103,9 +1099,9 @@ def main():
     args = parser.parse_args()
 
     iso3 = args.iso3.upper()
-    # Output: {ISO3}_data/ with catalogue/ and raw/ subdirs
+    # Output: {ISO3}_data/ with raw/ and catalogue/ subdirs
     base_dir = args.output_dir or os.path.join(PROJECT_DIR, '{}_data'.format(iso3))
-    output_dir = base_dir                              # analytical CSVs
+    output_dir = os.path.join(base_dir, 'raw')           # raw data CSVs
     catalogue_dir = os.path.join(base_dir, 'catalogue')  # dataset listings
     os.makedirs(output_dir, exist_ok=True)
     os.makedirs(catalogue_dir, exist_ok=True)
@@ -1142,12 +1138,12 @@ def main():
 
     summaries = []
 
-    # Date parameters for analytical sources
+    # Date parameters for raw data sources
     df = args.date_from
     dt = args.date_to
     mp = args.max_pages
 
-    # Source dispatch — catalogue sources go to catalogue_dir, analytical to output_dir
+    # Source dispatch — catalogue sources go to catalogue_dir, raw data to raw/
     # Note: ReliefWeb is catalogue but keeps date_from/date_to (we want period-filtered listings)
     dispatch = {
         'reliefweb': lambda: fetch_reliefweb(iso3, catalogue_dir, df, dt),
@@ -1183,9 +1179,6 @@ def main():
                 total_records=0, disability_records=0, note=str(e),
             ))
 
-    # Summary in raw/ (backward compat)
-    save_csv(summaries, os.path.join(output_dir, 'fetch_summary.csv'), SUMMARY_FIELDS)
-
     # Data inventory — 1 row per file across both dirs
     inventory = build_inventory(summaries, output_dir, catalogue_dir)
     if inventory:
@@ -1199,14 +1192,14 @@ def main():
             s['source'], s['category'], s['total_records'], s['disability_records'], s['note']))
 
     # List files
-    analytical = [f for f in sorted(os.listdir(output_dir))
-                  if f.endswith('.csv') and f != 'data_inventory.csv']
+    raw_files = [f for f in sorted(os.listdir(output_dir))
+                 if f.endswith('.csv')]
     catalogue_files = [f for f in sorted(os.listdir(catalogue_dir))
                        if f.endswith('.csv')] if os.path.isdir(catalogue_dir) else []
 
-    if analytical:
-        print('\nAnalytical — {} files'.format(len(analytical)))
-        for f in analytical:
+    if raw_files:
+        print('\nRaw — {} files'.format(len(raw_files)))
+        for f in raw_files:
             size = os.path.getsize(os.path.join(output_dir, f))
             print('  {} ({:,} bytes)'.format(f, size))
     if catalogue_files:
