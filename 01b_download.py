@@ -1,7 +1,7 @@
 """
 01b_download.py — Download datasets from catalogue
 ====================================================
-Finds {ISO3}_data/catalogue/ folders and downloads files to {ISO3}_data/downloads/.
+Finds {ISO3}_data/catalogue/ folders and downloads files to {ISO3}_data/raw/.
 
 Usage:
     python -X utf8 01b_download.py                # download all from all countries
@@ -41,7 +41,7 @@ if not catalogue_dirs:
 
 for cat_dir in catalogue_dirs:
     base = os.path.dirname(cat_dir)
-    raw_dir = os.path.join(base, 'downloads')
+    raw_dir = os.path.join(base, 'raw')
     country = os.path.basename(base).replace('_data', '')
     print('--- {} ---'.format(country))
     cmd = [sys.executable, '-X', 'utf8', DOWNLOAD,

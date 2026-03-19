@@ -33,16 +33,42 @@ python -X utf8 01b_download.py --select
 python -X utf8 01b_download.py
 ```
 
-Step 1 creates `UKR_data/` with a `raw/` subfolder (data from APIs — conflict events, displacement, food security, etc.) and a `catalogue/` subfolder (dataset listings with download URLs). Step 2 lets you browse that catalogue and pick which datasets to actually download — arrow keys to navigate, space to toggle, enter to confirm. Downloaded files go to `UKR_data/downloads/` and are marked with `x` in the catalogue CSV.
+Step 1 creates `UKR_data/` with a `raw/` subfolder (data from APIs — conflict events, displacement, food security, etc.) and a `catalogue/` subfolder (dataset listings with download URLs). Step 2 lets you browse that catalogue and pick which datasets to actually download — arrow keys to navigate, space to toggle, enter to confirm. Downloaded files go to `UKR_data/raw/` and are marked with `x` in the catalogue CSV.
 
 Sample output is included in `examples/ukraine/data/`.
 
 **Requirements**: Python 3.8+. Standard library only — no pip install.
 
+## Parameters
+
+The first argument is an **ISO 3166-1 alpha-3 country code** (e.g. `SDN`, `UKR`, `SYR`). Each source supports a different set of countries:
+
+| Source | Country coverage |
+|--------|-----------------|
+| **IMPACT/REACH** | Any country with REACH operations (~50 countries) |
+| **Liveuamap** | 80 ISO3 codes mapped to 106 subdomains — see [`references/liveuamap_iso3_mapping.csv`](references/liveuamap_iso3_mapping.csv) |
+| **ACLED** | All countries with recorded conflict events |
+| **HDX HAPI** | All countries in the Humanitarian Data Exchange |
+| **HDX CKAN** | Any country with datasets on HDX |
+| **UNHCR** | Countries with refugee populations |
+| **IDMC** | Countries with displacement data |
+| **INFORM** | 191 countries (risk index) |
+| **WFP HungerMap** | Countries with food consumption monitoring |
+| **World Bank** | All 217 World Bank economies |
+| **ACAPS** | Countries with active crises |
+| **GDACS** | Global (disaster alerts near the country) |
+| **HPC/FTS** | Countries with humanitarian response plans |
+| **IFRC Go** | Countries with IFRC operations |
+| **DTM/IOM** | Countries with displacement tracking |
+| **ReliefWeb** | Any country with reports filed |
+
+If a source has no data for the given country, it returns zero records and moves on.
+
 ## Filters
 
 | Flag | What it does | Example |
 |------|-------------|---------|
+| `ISO3` | Country code (required first argument) | `SDN`, `UKR`, `SYR` |
 | `--only` | Sources to query (comma-separated) | `--only impact,liveuamap` |
 | `--date-from` | Start date (YYYY-MM-DD) | `--date-from 2025-01-01` |
 | `--date-to` | End date (YYYY-MM-DD) | `--date-to 2025-12-31` |
@@ -81,15 +107,18 @@ scripts/
     ├── liveuamap_client.py
     └── ...
 
+references/
+├── liveuamap_event_types.csv      # cat_id → event_type mapping (76 types)
+└── liveuamap_iso3_mapping.csv     # ISO3 → subdomain mapping (80 countries)
+
 {ISO3}_data/                       # output (created automatically, one per country)
 ├── data_inventory.csv             # index of all files
-├── raw/                           # data from APIs (conflict events, displacement, etc.)
+├── raw/                           # all data: API results + downloaded datasets
 │   ├── liveuamap_events.csv
-│   └── hapi_idps.csv
-├── catalogue/                     # dataset listings with download URLs
-│   └── impact_all_resources.csv
-└── downloads/                     # datasets downloaded from the catalogue
-    └── REACH_UKR_MSNA.xlsx
+│   ├── hapi_idps.csv
+│   └── REACH_UKR_MSNA.xlsx
+└── catalogue/                     # dataset listings with download URLs
+    └── impact_all_resources.csv
 
 examples/
 └── ukraine/data/                  # sample output (800 events + IMPACT catalogue)

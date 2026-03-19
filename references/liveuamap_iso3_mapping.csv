@@ -1,0 +1,80 @@
+iso3,country,subdomain,type
+AFG,Afghanistan,afghanistan,dedicated
+DZA,Algeria,algeria,dedicated
+ARG,Argentina,argentina,dedicated
+BGD,Bangladesh,bangladesh,dedicated
+BLR,Belarus,belarus,dedicated
+BOL,Bolivia,bolivia,dedicated
+BRA,Brazil,brazil,dedicated
+BDI,Burundi,centralafrica,regional
+CMR,Cameroon,cameroon,dedicated
+CAN,Canada,canada,dedicated
+TCD,Chad,centralafrica,regional
+CHL,Chile,chile,dedicated
+COL,Colombia,colombia,dedicated
+COD,DR Congo,drcongo,dedicated
+EGY,Egypt,egypt,dedicated
+ETH,Ethiopia,ethiopia,dedicated
+FRA,France,france,dedicated
+GEO,Georgia,georgia,dedicated
+DEU,Germany,germany,dedicated
+GUY,Guyana,guyana,dedicated
+HTI,Haiti,latam,regional
+HKG,Hong Kong,hongkong,dedicated
+HND,Honduras,honduras,dedicated
+HUN,Hungary,hungary,dedicated
+IND,India,india,dedicated
+IDN,Indonesia,indonesia,dedicated
+IRN,Iran,iran,dedicated
+IRQ,Iraq,iraq,dedicated
+IRL,Ireland,ireland,dedicated
+ISR,Israel/Palestine,israelpalestine,dedicated
+ITA,Italy,italy,dedicated
+JPN,Japan,japan,dedicated
+KEN,Kenya,kenya,dedicated
+KOR,South Korea,koreas,dedicated
+PRK,North Korea,koreas,dedicated
+LBN,Lebanon,lebanon,dedicated
+LBY,Libya,libya,dedicated
+MLI,Mali,sahel,regional
+MDV,Maldives,maldives,dedicated
+MLT,Malta,malta,dedicated
+MEX,Mexico,mexico,dedicated
+MDA,Moldova,moldova,dedicated
+MOZ,Mozambique,africa,regional
+MMR,Myanmar,myanmar,dedicated
+NIC,Nicaragua,nicaragua,dedicated
+NER,Niger,sahel,regional
+NGA,Nigeria,nigeria,dedicated
+PAK,Pakistan,pakistan,dedicated
+PSE,Palestine,israelpalestine,dedicated
+PAN,Panama,panama,dedicated
+PER,Peru,peru,dedicated
+PHL,Philippines,philippines,dedicated
+POL,Poland,poland,dedicated
+PRI,Puerto Rico,puertorico,dedicated
+QAT,Qatar,qatar,dedicated
+RUS,Russia,russia,dedicated
+SAU,Saudi Arabia,saudiarabia,dedicated
+ZAF,South Africa,southafrica,dedicated
+SOM,Somalia,somalia,dedicated
+KOR,South Korea,koreas,dedicated
+SSD,South Sudan,sudan,regional
+ESP,Spain,spain,dedicated
+LKA,Sri Lanka,srilanka,dedicated
+SDN,Sudan,sudan,dedicated
+SYR,Syria,syria,dedicated
+TWN,Taiwan,taiwan,dedicated
+TZA,Tanzania,tanzania,dedicated
+THA,Thailand,thailand,dedicated
+TUN,Tunisia,tunisia,dedicated
+TUR,Turkey,turkey,dedicated
+UGA,Uganda,uganda,dedicated
+UKR,Ukraine,liveuamap,dedicated
+ARE,UAE,emirates,dedicated
+GBR,United Kingdom,uk,dedicated
+USA,United States,usa,dedicated
+VEN,Venezuela,venezuela,dedicated
+VNM,Vietnam,vietnam,dedicated
+YEM,Yemen,yemen,dedicated
+ZWE,Zimbabwe,zimbabwe,dedicated
