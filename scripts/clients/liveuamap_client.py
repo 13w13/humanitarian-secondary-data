@@ -17,6 +17,10 @@ Usage:
     client.save_csv(events, 'liveuamap_events.csv')
 
 Discovered 2026-03-19. Pagination exhausts naturally (globaltime=0).
+
+Known issue: liveuamap.com (UKR) has aggressive rate-limiting compared to
+country subdomains. The client uses adaptive delay + retry with backoff
+to handle this. If scraping UKR, use --date-from to limit depth.
 """
 import sys
 sys.stdout.reconfigure(encoding='utf-8')
@@ -35,6 +39,10 @@ from config import DEFAULT_TIMEOUT, save_csv
 
 LIVEUAMAP_PAGE_DELAY = 1.5   # seconds between pagination requests
 LIVEUAMAP_MAX_PAGES = 200    # safety cap per region
+_REQUEST_TIMEOUT = 15        # per-request timeout (seconds) — shorter than DEFAULT_TIMEOUT to detect hangs
+_MAX_RETRIES = 3             # retries per page on transient errors
+_MAX_CONSECUTIVE_ERRORS = 3  # stop pagination after N consecutive failures
+_PROGRESS_INTERVAL = 20      # print progress every N pages
 
 # cat_id → human-readable event type (decoded from picpath icon names)
 # Full inventory from 10,707 events across 11 HI regions (2026-03-19)
@@ -184,7 +192,11 @@ class LiveuamapClient:
         self.session_cookies = {}
 
     def _get(self, url, headers=None, timeout=None):
-        """GET request, returns (status, body_str, response_headers)."""
+        """GET request, returns (status, body_str).
+
+        Uses _REQUEST_TIMEOUT by default (15s) to detect server hangs
+        faster than the global DEFAULT_TIMEOUT (30s).
+        """
         hdrs = {
             'User-Agent': _USER_AGENT,
             'Accept': 'text/html,application/xhtml+xml,application/xml;q=0.9,*/*;q=0.8',
@@ -197,7 +209,7 @@ class LiveuamapClient:
                 '{}={}'.format(k, v) for k, v in self.session_cookies.items()
             )
         req = Request(url, headers=hdrs)
-        resp = urlopen(req, timeout=timeout or DEFAULT_TIMEOUT)
+        resp = urlopen(req, timeout=timeout or _REQUEST_TIMEOUT)
         # Capture cookies
         for hdr in resp.headers.get_all('Set-Cookie') or []:
             name_val = hdr.split(';')[0]
@@ -282,12 +294,14 @@ class LiveuamapClient:
         globaltime = data.get('globaltime', 0)
         page = 1
 
-        # --- Pages 2+: AJAX pagination ---
+        # --- Pages 2+: AJAX pagination with retry + adaptive delay ---
         ajax_headers = {
             'X-Requested-With': 'XMLHttpRequest',
             'Accept': 'application/json, text/javascript, */*; q=0.01',
             'Referer': base + '/',
         }
+        delay = LIVEUAMAP_PAGE_DELAY
+        consecutive_errors = 0
 
         while page < max_pages and globaltime != 0 and all_venues:
             last_id = all_venues[-1].get('id')
@@ -300,13 +314,57 @@ class LiveuamapClient:
                 if last_ts and last_ts < date_from_ts:
                     break
 
-            time_mod.sleep(LIVEUAMAP_PAGE_DELAY)
-            try:
-                url = '{}/ajax/do?act=prevday&id={}'.format(base, last_id)
-                _, body = self._get(url, headers=ajax_headers)
-                page_data = json.loads(body)
-            except (URLError, HTTPError, json.JSONDecodeError):
-                break
+            time_mod.sleep(delay)
+            url = '{}/ajax/do?act=prevday&id={}'.format(base, last_id)
+
+            # Retry loop with exponential backoff
+            page_data = None
+            for attempt in range(_MAX_RETRIES):
+                try:
+                    _, body = self._get(url, headers=ajax_headers)
+                    page_data = json.loads(body)
+                    break
+                except (URLError, HTTPError) as e:
+                    code = getattr(e, 'code', None)
+                    if attempt < _MAX_RETRIES - 1:
+                        backoff = delay * (2 ** (attempt + 1))
+                        print('  Liveuamap {}: page {} attempt {}/{} failed ({}), retry in {:.0f}s'.format(
+                            subdomain, page + 1, attempt + 1, _MAX_RETRIES,
+                            'HTTP {}'.format(code) if code else str(e)[:60],
+                            backoff), flush=True)
+                        time_mod.sleep(backoff)
+                    else:
+                        print('  Liveuamap {}: page {} failed after {} attempts ({})'.format(
+                            subdomain, page + 1, _MAX_RETRIES,
+                            'HTTP {}'.format(code) if code else str(e)[:60]),
+                            flush=True)
+                except json.JSONDecodeError:
+                    if attempt < _MAX_RETRIES - 1:
+                        backoff = delay * (2 ** (attempt + 1))
+                        print('  Liveuamap {}: page {} JSON decode error, retry in {:.0f}s'.format(
+                            subdomain, page + 1, backoff), flush=True)
+                        time_mod.sleep(backoff)
+                    else:
+                        print('  Liveuamap {}: page {} JSON decode failed after {} attempts'.format(
+                            subdomain, page + 1, _MAX_RETRIES), flush=True)
+
+            if page_data is None:
+                consecutive_errors += 1
+                if consecutive_errors >= _MAX_CONSECUTIVE_ERRORS:
+                    print('  Liveuamap {}: {} consecutive errors, stopping pagination '
+                          '(collected {} events so far)'.format(
+                              subdomain, consecutive_errors, len(all_venues)),
+                          flush=True)
+                    break
+                # Increase delay after errors
+                delay = min(delay * 1.5, 10.0)
+                page += 1
+                continue
+
+            # Success — reset error counter, ease delay back down
+            consecutive_errors = 0
+            if delay > LIVEUAMAP_PAGE_DELAY:
+                delay = max(delay * 0.9, LIVEUAMAP_PAGE_DELAY)
 
             globaltime = page_data.get('globaltime', 0)
             new_venues = page_data.get('venues', [])
@@ -324,6 +382,19 @@ class LiveuamapClient:
             page += 1
             if added == 0:
                 break
+
+            # Progress logging
+            if page % _PROGRESS_INTERVAL == 0:
+                last_ts = all_venues[-1].get('timestamp', 0)
+                last_dt = ''
+                if last_ts:
+                    try:
+                        last_dt = datetime.fromtimestamp(last_ts).strftime('%Y-%m-%d')
+                    except (ValueError, OSError):
+                        pass
+                print('  Liveuamap {}: page {}/{}, {} events so far, oldest={}, delay={:.1f}s'.format(
+                    subdomain, page, max_pages, len(all_venues),
+                    last_dt or '?', delay), flush=True)
 
         # --- Flatten to CSV rows + date filter ---
         # Dropped always-empty fields: description, udescription, keywords,
@@ -389,11 +460,9 @@ if __name__ == '__main__':
 
     print('Found {} events'.format(len(events)))
     if events:
-        ts_list = [e['timestamp'] for e in events if e.get('timestamp')]
-        if ts_list:
-            print('Range: {} -> {}'.format(
-                datetime.fromtimestamp(min(ts_list)).strftime('%Y-%m-%d'),
-                datetime.fromtimestamp(max(ts_list)).strftime('%Y-%m-%d'),
-            ))
+        # Records use 'datetime' (ISO string), not raw 'timestamp'
+        dt_list = sorted(e['datetime'] for e in events if e.get('datetime'))
+        if dt_list:
+            print('Range: {} -> {}'.format(dt_list[0][:10], dt_list[-1][:10]))
         out = args.output or 'liveuamap_{}.csv'.format(iso3.lower())
         save_csv(events, out)
