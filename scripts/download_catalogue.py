@@ -155,10 +155,138 @@ def scan_catalogue(catalogue_dir):
     return resources
 
 
+def _get_key():
+    """Read a single keypress. Returns key name: 'up', 'down', 'space', 'enter', 'a', 'q'."""
+    if sys.platform == 'win32':
+        import msvcrt
+        ch = msvcrt.getwch()
+        if ch in ('\x00', '\xe0'):  # special key prefix
+            ch2 = msvcrt.getwch()
+            return {'H': 'up', 'P': 'down'}.get(ch2, '')
+        return {'\r': 'enter', ' ': 'space', 'a': 'a', 'q': 'q'}.get(ch, ch)
+    else:
+        import tty, termios
+        fd = sys.stdin.fileno()
+        old = termios.tcgetattr(fd)
+        try:
+            tty.setraw(fd)
+            ch = sys.stdin.read(1)
+            if ch == '\x1b':
+                ch2 = sys.stdin.read(2)
+                return {'[A': 'up', '[B': 'down'}.get(ch2, '')
+            return {'\r': 'enter', '\n': 'enter', ' ': 'space',
+                    'a': 'a', 'q': 'q'}.get(ch, ch)
+        finally:
+            termios.tcsetattr(fd, termios.TCSADRAIN, old)
+
+
+def select_resources(downloadable):
+    """Interactive checkbox selection: arrows to move, space to toggle, enter to confirm.
+
+    Returns filtered list of resources to download.
+    """
+    n = len(downloadable)
+    selected = [False] * n
+    cursor = 0
+
+    def render():
+        # Move cursor up to redraw (except first render)
+        sys.stdout.write('\r')
+        lines = []
+        for i, r in enumerate(downloadable):
+            fname = _safe_filename(r['url'])
+            title = r.get('title', '')[:45]
+            label = title or fname[:45]
+            check = 'x' if selected[i] else ' '
+            arrow = '>' if i == cursor else ' '
+            lines.append(' {} [{}] {}'.format(arrow, check, label))
+        count = sum(selected)
+        lines.append('')
+        lines.append(' {}/{} selected | Space=toggle  a=all  Enter=confirm  q=cancel'.format(count, n))
+        return lines
+
+    # Clear and initial render
+    lines = render()
+    sys.stdout.write('\n'.join(lines))
+    sys.stdout.flush()
+    prev_len = len(lines)
+
+    while True:
+        key = _get_key()
+
+        if key == 'up':
+            cursor = (cursor - 1) % n
+        elif key == 'down':
+            cursor = (cursor + 1) % n
+        elif key == 'space':
+            selected[cursor] = not selected[cursor]
+        elif key == 'a':
+            all_on = all(selected)
+            selected = [not all_on] * n
+        elif key == 'enter':
+            # Move below the UI
+            sys.stdout.write('\n')
+            break
+        elif key == 'q':
+            sys.stdout.write('\n')
+            return []
+        else:
+            continue
+
+        # Redraw: move up, clear, rewrite
+        sys.stdout.write('\033[{}A\r'.format(prev_len))
+        lines = render()
+        for line in lines:
+            sys.stdout.write('\033[2K' + line + '\n')
+        sys.stdout.flush()
+        prev_len = len(lines)
+
+    return [downloadable[i] for i in range(n) if selected[i]]
+
+
+def _mark_downloaded(catalogue_dir, downloaded_urls):
+    """Add 'downloaded' column to catalogue CSVs for downloaded URLs."""
+    if not downloaded_urls:
+        return
+
+    url_set = set(downloaded_urls)
+    for fname in os.listdir(catalogue_dir):
+        if not fname.endswith('.csv'):
+            continue
+        fpath = os.path.join(catalogue_dir, fname)
+        try:
+            with open(fpath, encoding='utf-8') as f:
+                reader = csv.DictReader(f)
+                header = reader.fieldnames or []
+                url_col = URL_COLUMNS.get(fname) or _detect_url_column(header)
+                if not url_col or url_col not in header:
+                    continue
+                rows = list(reader)
+
+            # Check if any URL in this file was downloaded
+            touched = False
+            for row in rows:
+                url = row.get(url_col, '').strip()
+                if url in url_set:
+                    row['downloaded'] = 'x'
+                    touched = True
+                elif 'downloaded' not in row:
+                    row['downloaded'] = ''
+
+            if touched:
+                out_fields = header + (['downloaded'] if 'downloaded' not in header else [])
+                with open(fpath, 'w', newline='', encoding='utf-8') as f:
+                    writer = csv.DictWriter(f, fieldnames=out_fields, extrasaction='ignore')
+                    writer.writeheader()
+                    writer.writerows(rows)
+        except Exception:
+            pass
+
+
 def download_from_catalogue(catalogue_dir, output_dir,
                             source=None, filter_text=None,
                             dry_run=False, skip_existing=True,
-                            data_dir=None):
+                            data_dir=None, interactive=False):
     """Download files from catalogue CSVs.
 
     Args:
@@ -168,6 +296,7 @@ def download_from_catalogue(catalogue_dir, output_dir,
         filter_text: filter by title/URL substring (e.g., 'msna', 'disability')
         dry_run: list without downloading
         skip_existing: skip files already present in output_dir
+        interactive: prompt user to select which datasets to download
 
     Returns:
         dict with counts: downloaded, skipped, failed, not_downloadable
@@ -200,9 +329,17 @@ def download_from_catalogue(catalogue_dir, output_dir,
     else:
         print()
 
+    # Interactive selection
+    if interactive and downloadable and not dry_run:
+        downloadable = select_resources(downloadable)
+        if not downloadable:
+            return {'downloaded': 0, 'skipped': 0, 'failed': 0, 'not_downloadable': len(listings)}
+        print('\n{} selected for download.\n'.format(len(downloadable)))
+
     os.makedirs(output_dir, exist_ok=True)
 
     counts = {'downloaded': 0, 'skipped': 0, 'failed': 0, 'not_downloadable': len(listings)}
+    downloaded_urls = []
 
     for i, r in enumerate(downloadable, 1):
         fname = _safe_filename(r['url'])
@@ -218,6 +355,7 @@ def download_from_catalogue(catalogue_dir, output_dir,
             print('  [{}/{}] EXISTS ({:,} bytes) {}'.format(
                 i, len(downloadable), size, fname[:45]))
             counts['skipped'] += 1
+            downloaded_urls.append(r['url'])
             continue
 
         print('  [{}/{}] {}...'.format(i, len(downloadable), fname[:50]), end=' ')
@@ -225,11 +363,16 @@ def download_from_catalogue(catalogue_dir, output_dir,
         if ok:
             print('{:,} bytes'.format(result))
             counts['downloaded'] += 1
+            downloaded_urls.append(r['url'])
         else:
             print('FAILED: {}'.format(result))
             counts['failed'] += 1
 
         time.sleep(0.5)
+
+    # Mark downloaded in catalogue CSVs
+    if not dry_run and downloaded_urls:
+        _mark_downloaded(catalogue_dir, downloaded_urls)
 
     # Update inventory after download
     if not dry_run and counts['downloaded'] > 0 and data_dir:
@@ -324,6 +467,8 @@ def main():
                         help='List files without downloading')
     parser.add_argument('--scan', action='store_true',
                         help='Just scan and report what is in the catalogue')
+    parser.add_argument('--select', action='store_true',
+                        help='Interactive selection: pick which datasets to download')
     args = parser.parse_args()
 
     if args.scan:
@@ -344,7 +489,7 @@ def main():
     counts = download_from_catalogue(
         args.catalogue_dir, args.output_dir,
         source=args.source, filter_text=args.filter_text,
-        dry_run=args.dry_run)
+        dry_run=args.dry_run, interactive=args.select)
 
     print('\n---')
     if args.dry_run:

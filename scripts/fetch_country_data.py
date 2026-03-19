@@ -30,7 +30,7 @@ sys.path.insert(0, os.path.join(os.path.dirname(os.path.abspath(__file__)), 'cli
 # Country name mapping for HDX search (ISO3 -> name)
 COUNTRY_NAMES = {
     'AFG': 'afghanistan', 'BDI': 'burundi', 'COD': 'congo', 'ETH': 'ethiopia',
-    'HTI': 'haiti', 'IRQ': 'iraq', 'KEN': 'kenya', 'LBN': 'lebanon',
+    'HTI': 'haiti', 'IRN': 'iran', 'IRQ': 'iraq', 'KEN': 'kenya', 'LBN': 'lebanon',
     'LBY': 'libya', 'MLI': 'mali', 'MMR': 'myanmar', 'MOZ': 'mozambique',
     'NER': 'niger', 'NGA': 'nigeria', 'PAK': 'pakistan', 'PSE': 'palestine',
     'SDN': 'sudan', 'SOM': 'somalia', 'SSD': 'south sudan', 'SYR': 'syria',
@@ -41,6 +41,7 @@ ALL_SOURCES = [
     'reliefweb', 'hapi', 'hdx', 'idmc', 'unhcr', 'inform',
     'wfp', 'worldbank', 'acled', 'acaps', 'dtm',
     'gdacs', 'hpc', 'ifrcgo', 'impact', 'dtm_portal',
+    'liveuamap',
 ]
 
 SCRIPT_DIR = os.path.dirname(os.path.abspath(__file__))
@@ -64,6 +65,7 @@ SOURCE_CATEGORIES = {
     'ifrcgo': 'analytical',
     'impact': 'catalogue',
     'dtm_portal': 'catalogue',
+    'liveuamap': 'analytical',
 }
 
 CATALOGUE_SOURCES = {k for k, v in SOURCE_CATEGORIES.items() if v == 'catalogue'}
@@ -81,6 +83,7 @@ SOURCE_DISPLAY_NAMES = {
     'acaps': 'ACAPS', 'dtm': 'DTM/IOM', 'gdacs': 'GDACS',
     'hpc': 'HPC/FTS', 'ifrcgo': 'IFRC Go', 'impact': 'IMPACT/REACH',
     'dtm_portal': 'DTM Portal',
+    'liveuamap': 'Liveuamap',
 }
 
 SUMMARY_FIELDS = [
@@ -1053,6 +1056,34 @@ def fetch_dtm_portal(iso3, output_dir):
     )
 
 
+def fetch_liveuamap(iso3, output_dir, date_from=None, date_to=None, max_pages=200):
+    """Fetch Liveuamap conflict events for a country (scraping, no API key)."""
+    from liveuamap_client import LiveuamapClient
+    client = LiveuamapClient()
+    files = []
+
+    print('\n--- Liveuamap ---')
+
+    events = client.get_events(iso3, max_pages=max_pages, date_from=date_from, date_to=date_to)
+
+    if events:
+        save_csv(events, os.path.join(output_dir, 'liveuamap_events.csv'),
+                 ['event_id', 'datetime', 'event_type', 'cat_id', 'color_id',
+                  'name', 'location', 'lat', 'lng',
+                  'source_url', 'link', 'picture'])
+        files.append('liveuamap_events.csv')
+
+    p_from, p_to = _extract_date_range(events, 'datetime') if events else ('', '')
+    return _make_result(
+        source='Liveuamap', category='analytical',
+        total_records=len(events),
+        disability_records=0,
+        period_from=p_from, period_to=p_to,
+        files=files,
+        note='{} conflict events (scraped)'.format(len(events)),
+    )
+
+
 def main():
     parser = argparse.ArgumentParser(description='Fetch secondary data for a country')
     parser.add_argument('iso3', help='ISO3 country code (e.g., LBN, SDN, SYR)')
@@ -1068,12 +1099,14 @@ def main():
     parser.add_argument('--skip-ifrcgo', action='store_true', help='Skip IFRC Go')
     parser.add_argument('--only', help='Comma-separated list of sources to fetch (e.g., reliefweb,hapi,idmc)')
     parser.add_argument('--output-dir', help='Override output directory')
+    parser.add_argument('--max-pages', type=int, default=200, help='Max pagination pages for Liveuamap (default 200)')
     args = parser.parse_args()
 
     iso3 = args.iso3.upper()
-    output_dir = args.output_dir or os.path.join(PROJECT_DIR, 'data', iso3)
-    data_dir = os.path.dirname(output_dir)  # parent = data/
-    catalogue_dir = os.path.join(data_dir, 'catalogue')
+    # Output: {ISO3}_data/ with catalogue/ and raw/ subdirs
+    base_dir = args.output_dir or os.path.join(PROJECT_DIR, '{}_data'.format(iso3))
+    output_dir = base_dir                              # analytical CSVs
+    catalogue_dir = os.path.join(base_dir, 'catalogue')  # dataset listings
     os.makedirs(output_dir, exist_ok=True)
     os.makedirs(catalogue_dir, exist_ok=True)
 
@@ -1101,8 +1134,7 @@ def main():
 
     print('=' * 60)
     print('Secondary Data Sources — {} ({})'.format(iso3, datetime.now().strftime('%Y-%m-%d %H:%M')))
-    print('Analytical -> {}'.format(output_dir))
-    print('Catalogue  -> {}'.format(catalogue_dir))
+    print('Output: {}'.format(os.path.abspath(base_dir)))
     print('Sources: {}'.format(', '.join(sources)))
     if args.date_from:
         print('Period: {} -> {}'.format(args.date_from, args.date_to or 'now'))
@@ -1113,6 +1145,7 @@ def main():
     # Date parameters for analytical sources
     df = args.date_from
     dt = args.date_to
+    mp = args.max_pages
 
     # Source dispatch — catalogue sources go to catalogue_dir, analytical to output_dir
     # Note: ReliefWeb is catalogue but keeps date_from/date_to (we want period-filtered listings)
@@ -1133,6 +1166,7 @@ def main():
         'ifrcgo': lambda: fetch_ifrcgo(iso3, output_dir),
         'impact': lambda: fetch_impact(iso3, catalogue_dir),
         'dtm_portal': lambda: fetch_dtm_portal(iso3, catalogue_dir),
+        'liveuamap': lambda: fetch_liveuamap(iso3, output_dir, df, dt, mp),
     }
 
     for source in sources:
@@ -1155,7 +1189,7 @@ def main():
     # Data inventory — 1 row per file across both dirs
     inventory = build_inventory(summaries, output_dir, catalogue_dir)
     if inventory:
-        save_csv(inventory, os.path.join(data_dir, 'data_inventory.csv'), INVENTORY_FIELDS)
+        save_csv(inventory, os.path.join(base_dir, 'data_inventory.csv'), INVENTORY_FIELDS)
 
     print('\n' + '=' * 60)
     print('SUMMARY — {}'.format(iso3))
@@ -1164,19 +1198,24 @@ def main():
         print('  {} [{}] — {} records (disability: {}) | {}'.format(
             s['source'], s['category'], s['total_records'], s['disability_records'], s['note']))
 
-    # List files per directory
-    for label, d in [('Analytical (raw/)', output_dir), ('Catalogue (catalogue/)', catalogue_dir)]:
-        if os.path.isdir(d):
-            files = [f for f in sorted(os.listdir(d)) if f.endswith('.csv')]
-            if files:
-                print('\n{} — {} files'.format(label, len(files)))
-                for f in files:
-                    size = os.path.getsize(os.path.join(d, f))
-                    print('  {} ({:,} bytes)'.format(f, size))
+    # List files
+    analytical = [f for f in sorted(os.listdir(output_dir))
+                  if f.endswith('.csv') and f != 'data_inventory.csv']
+    catalogue_files = [f for f in sorted(os.listdir(catalogue_dir))
+                       if f.endswith('.csv')] if os.path.isdir(catalogue_dir) else []
 
-    if inventory:
-        print('\nInventory: {} files -> {}'.format(
-            len(inventory), os.path.join(data_dir, 'data_inventory.csv')))
+    if analytical:
+        print('\nAnalytical — {} files'.format(len(analytical)))
+        for f in analytical:
+            size = os.path.getsize(os.path.join(output_dir, f))
+            print('  {} ({:,} bytes)'.format(f, size))
+    if catalogue_files:
+        print('\nCatalogue — {} files'.format(len(catalogue_files)))
+        for f in catalogue_files:
+            size = os.path.getsize(os.path.join(catalogue_dir, f))
+            print('  {} ({:,} bytes)'.format(f, size))
+
+    print('\nOutput: {}'.format(os.path.abspath(base_dir)))
 
     print('=' * 60)
 

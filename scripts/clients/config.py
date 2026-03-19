@@ -7,13 +7,13 @@ NO secrets here — credentials in keyring or env vars.
 
 # ─── ReliefWeb ──────────────────────────────────────────────
 RELIEFWEB_BASE = 'https://api.reliefweb.int/v1'
-RELIEFWEB_APPNAME = 'your-app-name'  # Any string works — identifies your requests
+RELIEFWEB_APPNAME = 'humanitarian-secondary-data'  # Any string — identifies your requests
 
 # ─── HDX HAPI ───────────────────────────────────────────────
 HAPI_BASE = 'https://hapi.humdata.org/api/v2'
 # app_identifier: base64 of "your-app:your@email.com"
-# Generate: python -c "import base64; print(base64.b64encode(b'app:email@example.com').decode())"
-HAPI_APP_ID = ''  # Set your own — see https://hapi.humdata.org/docs
+# Generate yours: python -c "import base64; print(base64.b64encode(b'my-app:me@example.com').decode())"
+HAPI_APP_ID = 'aHVtYW5pdGFyaWFuLXNlY29uZGFyeS1kYXRhOm5vcmVwbHlAZXhhbXBsZS5jb20='
 
 # ─── HDX CKAN ───────────────────────────────────────────────
 HDX_CKAN_BASE = 'https://data.humdata.org/api/3/action'
@@ -78,6 +78,12 @@ IFRCGO_BASE = 'https://goadmin.ifrc.org/api/v2'
 #   ACLED — acleddata.com (free account, OAuth2 password grant)
 #   ACAPS — api.acaps.org/register (free)
 #   IDMC — email ch.datainfo@idmc.ch (free)
+
+# ─── Liveuamap ──────────────────────────────────────────────
+# Public, no auth. Conflict events scraped from HTML (base64 ovens + AJAX pagination).
+# Covers: SDN, SYR, YEM, LBN, IRQ, AFG, COD, PSE, MMR, ETH, LBY + more
+LIVEUAMAP_PAGE_DELAY = 1.5  # seconds between pagination requests
+LIVEUAMAP_MAX_PAGES = 200   # safety cap per region
 
 # ─── Common ─────────────────────────────────────────────────
 DEFAULT_TIMEOUT = 30

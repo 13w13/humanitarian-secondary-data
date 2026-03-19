@@ -1,0 +1,3 @@
+source,category,total_records,disability_records,period_from,period_to,last_update,files,note
+IMPACT/REACH,catalogue,1521,6,,,,"impact_msna_datasets.csv, impact_all_resources.csv","6 MSNA datasets, 1521 total resources"
+Liveuamap,analytical,800,0,2026-02-13,2026-03-19,,liveuamap_events.csv,800 conflict events (scraped)

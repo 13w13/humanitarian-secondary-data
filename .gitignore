@@ -1,10 +1,13 @@
 __pycache__/
 *.pyc
 .env
-data/
+*_data/
 analysis/
 *.csv
+# Allow example output data
+!examples/*/data/
+!examples/*/data/*.csv
 .vscode/
 .idea/
-# Keep real config local (has personal API identifiers)
-scripts/clients/config.py
+# config.py is published (no secrets — only public endpoints and free app IDs)
+# Keep credentials in keyring or .env (which IS gitignored)
