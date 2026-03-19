@@ -1,0 +1,10 @@
+__pycache__/
+*.pyc
+.env
+data/
+analysis/
+*.csv
+.vscode/
+.idea/
+# Keep real config local (has personal API identifiers)
+scripts/clients/config.py
