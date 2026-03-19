@@ -23,16 +23,17 @@ git clone https://github.com/13w13/humanitarian-secondary-data.git
 cd humanitarian-secondary-data
 
 # Step 1 — Fetch data for Ukraine (IMPACT datasets + Liveuamap conflict events)
+# Liveuamap scrapes event data from HTML pages — no API, just polite persistence.
 python -X utf8 01_fetch.py UKR --only impact,liveuamap --date-from 2026-01-01
 
-# Step 2 — Pick which datasets to download
+# Step 2 — Browse the catalogue and pick which datasets to download
 python -X utf8 01b_download.py --select
 
-# Step 3 — Download all
+# Step 3 — Download all selected datasets
 python -X utf8 01b_download.py
 ```
 
-Step 1 creates `UKR_data/` with analytical CSVs and a `catalogue/` subfolder (dataset listings with URLs). Step 2 shows a checkbox picker — arrow keys to navigate, space to toggle, enter to confirm. Downloaded files go to `UKR_data/raw/` and are marked with `x` in the catalogue CSV.
+Step 1 creates `UKR_data/` with analytical CSVs and a `catalogue/` subfolder listing available datasets with URLs. Step 2 lets you browse that catalogue and pick which ones to actually download — arrow keys to navigate, space to toggle, enter to confirm. Downloaded files go to `UKR_data/raw/` and are marked with `x` in the catalogue CSV.
 
 Sample output is included in `examples/ukraine/data/`.
 

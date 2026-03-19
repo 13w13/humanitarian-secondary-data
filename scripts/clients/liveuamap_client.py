@@ -43,7 +43,7 @@ LIVEUAMAP_MAX_PAGES = 200    # safety cap per region
 _REQUEST_TIMEOUT = 15        # per-request timeout (seconds) — shorter than DEFAULT_TIMEOUT to detect hangs
 _MAX_RETRIES = 3             # retries per page on transient errors
 _MAX_CONSECUTIVE_ERRORS = 3  # stop pagination after N consecutive failures
-_PROGRESS_INTERVAL = 20      # print progress every N pages
+_PROGRESS_INTERVAL = 5       # print progress every N pages
 
 # cat_id → human-readable event type (decoded from picpath icon names)
 # Full inventory from 10,707 events across 11 HI regions (2026-03-19)
@@ -273,6 +273,7 @@ class LiveuamapClient:
 
         base = self._base_url(subdomain)
         self.session_cookies = {}  # fresh session per region
+        _t0 = time_mod.time()
 
         # --- Page 1: HTML + base64 ---
         try:
@@ -387,8 +388,12 @@ class LiveuamapClient:
             if added == 0:
                 break
 
-            # Progress logging
+            # Progress logging with ETA
             if page % _PROGRESS_INTERVAL == 0:
+                elapsed = time_mod.time() - _t0
+                sec_per_page = elapsed / page
+                remaining_pages = max_pages - page
+                eta = sec_per_page * remaining_pages
                 last_ts = all_venues[-1].get('timestamp', 0)
                 last_dt = ''
                 if last_ts:
@@ -396,9 +401,9 @@ class LiveuamapClient:
                         last_dt = datetime.fromtimestamp(last_ts).strftime('%Y-%m-%d')
                     except (ValueError, OSError):
                         pass
-                print('  Liveuamap {}: page {}/{}, {} events so far, oldest={}, delay={:.1f}s'.format(
+                print('  Liveuamap {}: page {}/{} | {} events | oldest {} | {:.0f}s elapsed ~{:.0f}s remaining'.format(
                     subdomain, page, max_pages, len(all_venues),
-                    last_dt or '?', delay), flush=True)
+                    last_dt or '?', elapsed, eta), flush=True)
 
         # --- Flatten to CSV rows + date filter ---
         # Dropped always-empty fields: description, udescription, keywords,
@@ -426,8 +431,9 @@ class LiveuamapClient:
                 'picture': v.get('picture', ''),
             })
 
-        print('  Liveuamap {}: {} events ({} pages, {} after date filter)'.format(
-            subdomain, len(all_venues), page, len(records)))
+        elapsed = time_mod.time() - _t0
+        print('  Liveuamap {}: {} events ({} pages, {} after date filter) in {:.0f}s'.format(
+            subdomain, len(all_venues), page, len(records), elapsed))
         return records
 
     @staticmethod
