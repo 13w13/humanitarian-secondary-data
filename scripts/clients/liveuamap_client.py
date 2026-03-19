@@ -37,7 +37,8 @@ from config import DEFAULT_TIMEOUT, save_csv
 
 # --- Constants -----------------------------------------------------------
 
-LIVEUAMAP_PAGE_DELAY = 1.5   # seconds between pagination requests
+LIVEUAMAP_PAGE_DELAY = 1.0   # seconds between pagination requests (country subdomains)
+_MAIN_DOMAIN_DELAY = 2.5     # higher delay for liveuamap.com (UKR) — avoids rate-limit retries
 LIVEUAMAP_MAX_PAGES = 200    # safety cap per region
 _REQUEST_TIMEOUT = 15        # per-request timeout (seconds) — shorter than DEFAULT_TIMEOUT to detect hangs
 _MAX_RETRIES = 3             # retries per page on transient errors
@@ -300,7 +301,9 @@ class LiveuamapClient:
             'Accept': 'application/json, text/javascript, */*; q=0.01',
             'Referer': base + '/',
         }
-        delay = LIVEUAMAP_PAGE_DELAY
+        # UKR uses the main domain which rate-limits more aggressively.
+        # Higher base delay = fewer retries = faster overall.
+        delay = _MAIN_DOMAIN_DELAY if subdomain == 'liveuamap' else LIVEUAMAP_PAGE_DELAY
         consecutive_errors = 0
 
         while page < max_pages and globaltime != 0 and all_venues:
@@ -363,8 +366,9 @@ class LiveuamapClient:
 
             # Success — reset error counter, ease delay back down
             consecutive_errors = 0
-            if delay > LIVEUAMAP_PAGE_DELAY:
-                delay = max(delay * 0.9, LIVEUAMAP_PAGE_DELAY)
+            base_delay = _MAIN_DOMAIN_DELAY if subdomain == 'liveuamap' else LIVEUAMAP_PAGE_DELAY
+            if delay > base_delay:
+                delay = max(delay * 0.9, base_delay)
 
             globaltime = page_data.get('globaltime', 0)
             new_venues = page_data.get('venues', [])

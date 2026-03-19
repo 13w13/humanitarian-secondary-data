@@ -116,6 +116,18 @@ examples/
 
 Published = code in this repo. Internal = tested, will be released progressively.
 
+## Performance notes
+
+**Liveuamap** scraping speed depends on the region. Country subdomains (SDN, SYR, etc.) respond fast with a 1s delay between pages. The main domain `liveuamap.com` (used for UKR) has more aggressive Cloudflare rate-limiting and uses a higher base delay (2.5s/page) to avoid costly retries.
+
+| Region | Pages for 30 days | Estimated time |
+|--------|-------------------|----------------|
+| SDN, SYR, YEM | 10–30 | 15–45s |
+| UKR | 30–50 | 1.5–2.5 min |
+| UKR (no date filter, 200 pages) | 200 | 8–10 min |
+
+**Tip**: Always use `--date-from` to limit pagination depth, especially for UKR. This is the single biggest performance lever — 30 days of UKR data takes ~2 minutes instead of 8–10 for a full 200-page crawl.
+
 ## Disability data gap
 
 One motivation behind this project: making the disability data gap measurable.
