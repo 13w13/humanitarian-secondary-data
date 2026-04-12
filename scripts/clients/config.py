@@ -17,6 +17,7 @@ HAPI_APP_ID = 'aHVtYW5pdGFyaWFuLXNlY29uZGFyeS1kYXRhOm5vcmVwbHlAZXhhbXBsZS5jb20='
 
 # ─── HDX CKAN ───────────────────────────────────────────────
 HDX_CKAN_BASE = 'https://data.humdata.org/api/3/action'
+# JWT API key via keyring sds.hdx/api_key (Authorization header)
 
 # ─── ACLED ──────────────────────────────────────────────────
 ACLED_BASE = 'https://acleddata.com/api/acled/read'  # New endpoint (2025+)
@@ -67,6 +68,7 @@ IFRCGO_BASE = 'https://goadmin.ifrc.org/api/v2'
 # ─── API Keys — keyring (preferred) or env vars ─────────
 # Convention: keyring service = sds.{provider}, username = field name
 #
+#   keyring.set_password('sds.hdx', 'api_key', '...')     # HDX HAPI JWT token
 #   keyring.set_password('sds.acled', 'email', '...')
 #   keyring.set_password('sds.acled', 'password', '...')
 #   keyring.set_password('sds.acaps', 'api_key', '...')

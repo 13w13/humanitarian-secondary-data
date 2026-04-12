@@ -59,7 +59,7 @@ except ImportError:
 AJAX_URL = 'https://www.impact-initiatives.org/wp-admin/admin-ajax.php'
 COUNTRIES_JSON = 'https://www.impact-initiatives.org/wp-content/uploads/repository/countries.json'
 
-# --- Filter IDs (discovered 2026-03-18) ---
+# --- Filter IDs (discovered 2026-03-18, updated 2026-04-12 via screen_filters API) ---
 
 PROGRAMME_IDS = {
     'msna': 756,
@@ -67,6 +67,12 @@ PROGRAMME_IDS = {
     'rna': 755,           # Rapid Needs Assessment
     'migration': 753,
     'cash_markets': 742,
+    'ana': 780,           # Acute needs analysis
+    'jmmi': 764,          # Joint Market Monitoring Initiative
+    'accountability': 758,
+    'settlement': 757,    # Area & Settlement Based Approaches
+    'climate_drr': 763,
+    'public_health': 761,
 }
 
 TYPE_IDS = {
@@ -75,14 +81,32 @@ TYPE_IDS = {
     'qualitative_grid': 776,
     'factsheet': 280,
     'report': 286,
+    'brief': 436,
+    'map': 281,
+    'methodology': 773,
+    'dap': 774,           # Data Analysis Plan
+    'presentation': 284,
+    'tor': 288,
+    'dashboard': 760,
 }
 
-# Country name → IMPACT location ID
+# ISO3 → IMPACT location ID (from screen_filters API, 64 locations)
 LOCATION_IDS = {
-    'AFG': 12, 'BGD': 31, 'CAF': 56, 'COD': 609, 'HTI': 111,
-    'IRQ': 119, 'JOR': 127, 'LBN': 136, 'LBY': 139, 'MLI': 149,
-    'NER': 173, 'NGA': 174, 'PSE': 183, 'SOM': 211, 'SSD': 215,
-    'SYR': 231, 'UKR': 250, 'YEM': 262,
+    'AFG': 12, 'ARM': 648, 'BGD': 31, 'BEN': 738, 'BWA': 525,
+    'BRA': 42, 'BFA': 509, 'CMR': 522, 'CAF': 56, 'TCD': 58,
+    'CHL': 638, 'COL': 453, 'HRV': 552, 'CIV': 737, 'COD': 609,
+    'ETH': 628, 'GHA': 739, 'GRC': 101, 'HTI': 111, 'HUN': 553,
+    'IDN': 428, 'IRQ': 119, 'ITA': 123, 'JOR': 127, 'KEN': 471,
+    'KGZ': 133, 'LBN': 136, 'LBY': 139, 'MKD': 554, 'MLI': 149,
+    'MDA': 705, 'MOZ': 474, 'MMR': 165, 'NPL': 168, 'NER': 173,
+    'NGA': 174, 'PSE': 183, 'PAN': 643, 'PER': 187, 'PHL': 188,
+    'POL': 704, 'COG': 415, 'ROU': 706, 'SEN': 769, 'SRB': 555,
+    'SVK': 712, 'SVN': 556, 'SOM': 211, 'SSD': 215, 'ESP': 560,
+    'LKA': 736, 'SDN': 526, 'SYR': 231, 'TZA': 529, 'TGO': 740,
+    'TUR': 557, 'UGA': 249, 'UKR': 250, 'VUT': 256, 'VEN': 614,
+    'YEM': 262,
+    # Special
+    'GLOBAL': 767,
 }
 
 # ISO2 → ISO3 for countries.json (uses ISO2)
@@ -271,22 +295,76 @@ class IMPACTClient:
         return all_resources
 
     def search_msna_datasets(self, country_iso3=None):
-        """Shortcut: list all MSNA datasets (programme=756, type=777).
+        """Shortcut: list all MSNA data resources (datasets + analysis output tables).
+
+        Searches programme=MSNA with type=dataset OR type=analysis_output,
+        because MSNA analysis tables (e.g., Sudan 2025) are often tagged as
+        analysis_output rather than dataset.
 
         Args:
-            country_iso3: Optional ISO3 filter (e.g., 'PSE')
+            country_iso3: Optional ISO3 filter (e.g., 'PSE', 'SDN')
 
-        Returns list of resource dicts.
+        Returns list of resource dicts (deduplicated by URL).
         """
-        kwargs = {
-            'programme': 'msna',
-            'doc_type': 'dataset',
-            'order': 'latest',
-        }
-        if country_iso3:
-            kwargs['location_iso3'] = country_iso3
+        all_resources = []
+        seen_urls = set()
 
-        return self.search_all_pages(**kwargs)
+        for doc_type in ('dataset', 'analysis_output'):
+            kwargs = {
+                'programme': 'msna',
+                'doc_type': doc_type,
+                'order': 'latest',
+            }
+            if country_iso3:
+                kwargs['location_iso3'] = country_iso3
+
+            resources = self.search_all_pages(**kwargs)
+            for r in resources:
+                if r['url'] not in seen_urls:
+                    seen_urls.add(r['url'])
+                    all_resources.append(r)
+
+        return all_resources
+
+    def fetch_filters(self, filter_names=None):
+        """Fetch available filter options from the IMPACT Resource Centre.
+
+        Uses the screen_filters AJAX action to get dynamically-loaded
+        filter checkboxes. Useful for discovering location IDs for new countries.
+
+        Args:
+            filter_names: List of filter names to fetch.
+                Defaults to ['location', 'programme', 'type'].
+
+        Returns:
+            dict mapping filter_name -> list of (id, label) tuples.
+        """
+        if filter_names is None:
+            filter_names = ['location', 'programme', 'type']
+
+        results = {}
+        for fname in filter_names:
+            params = urlencode([
+                ('action', 'screen_filters'),
+                ('args[filter][]', fname),
+            ]).encode('utf-8')
+            req = Request(self.ajax_url, data=params, headers={
+                'User-Agent': 'Mozilla/5.0 (Windows NT 10.0; Win64; x64)',
+                'Content-Type': 'application/x-www-form-urlencoded',
+                'X-Requested-With': 'XMLHttpRequest',
+            })
+            try:
+                resp = urlopen(req, timeout=DEFAULT_TIMEOUT)
+                data = json.loads(resp.read().decode('utf-8', errors='replace'))
+                html = data.get(fname, '')
+                options = re.findall(
+                    r'value=["\'](\d+)["\']\s+id="[^"]+"></div>\s*<div><label[^>]+>([^<]+)',
+                    html)
+                results[fname] = [(int(v), label.strip()) for v, label in options]
+            except Exception:
+                results[fname] = []
+
+        return results
 
     def get_country_resources(self, iso2_or_iso3):
         """Get latest resources for a country from countries.json (fast, cached).
