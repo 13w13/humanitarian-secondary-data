@@ -8,7 +8,13 @@ hypothese. Le commentaire dit ce qui etait faux et ce qu'on a mesure.
 
 Stdlib uniquement, comme les clients (regle 2 du plan) : pas de pytest.
 Ces tests appellent les vraies API : ils sont lents (~2 min) et supposent le reseau
-plus les identifiants keyring (ACLED, IDMC). Un manque d'identifiant fait SKIP, pas FAIL.
+plus les identifiants keyring (ACLED, IDMC).
+
+Font SKIP, pas FAIL : un identifiant manquant, et une **panne amont** (5xx, timeout,
+indispo signalee par le client). Voir `is_upstream_outage`. FAIL est reserve a ce qui
+nous incombe : contrat viole, schema change, 4xx (donc URL fausse). Sans cette
+distinction, un 502 de World Bank se lit comme trois regressions et le rouge de la
+suite ne veut plus rien dire.
 """
 import os
 import sys
@@ -29,6 +35,40 @@ def check(label, cond, detail=''):
 def skip(label, why):
     SKIP.append(label)
     print('  [SKIP] {} ({})'.format(label, why))
+
+
+def is_upstream_outage(exc):
+    """L'exception dit-elle « le fournisseur est en panne » plutot que « on a un bug » ?
+
+    La distinction est le nerf de la suite : ces tests appellent de VRAIES API, donc
+    une panne amont est certaine d'arriver un jour. La confondre avec une regression
+    rend le rouge inexploitable, et quelqu'un qui clone le depot conclut que l'outil
+    est casse alors que c'est World Bank qui renvoie 502.
+
+    Sont des pannes : les 5xx, les erreurs de transport (timeout, connexion refusee,
+    DNS), et les exceptions de domaine que le client leve DEJA pour dire l'indispo
+    (GDACSUnavailable). N'en sont PAS : un 4xx (URL fausse = notre bug), un
+    ValueError/AssertionError (contrat viole), un KeyError (schema change).
+    """
+    from urllib.error import HTTPError, URLError
+    import socket
+    if type(exc).__name__ in ('GDACSUnavailable', 'SourceUnavailable'):
+        return True
+    if isinstance(exc, HTTPError):
+        return exc.code >= 500
+    if isinstance(exc, (URLError, socket.timeout, TimeoutError, ConnectionError)):
+        return True
+    return False
+
+
+def upstream_reachable(url, timeout=15):
+    """Sonde un endpoint avant d'y consacrer des assertions. True si exploitable."""
+    from urllib.request import urlopen
+    try:
+        urlopen(url, timeout=timeout).read(64)
+        return True
+    except Exception as e:
+        return not is_upstream_outage(e)
 
 
 def section(n, title):
@@ -163,6 +203,12 @@ def t_acaps():
 def t_worldbank():
     section(10, 'World Bank : erreurs rendues en HTTP 200, libelles internes, pas de mrnev')
     from worldbank_client import WorldBankClient
+    # Ces 3 assertions portent sur la LECTURE d'une reponse. Si l'API est en panne il
+    # n'y a rien a lire : on saute, sinon un 502 amont se lit comme 3 regressions.
+    if not upstream_reachable(
+            'https://api.worldbank.org/v2/country/SDN/indicator/SP.POP.TOTL?format=json'):
+        skip('t_worldbank (3 assertions)', 'api.worldbank.org en panne')
+        return
     w = WorldBankClient()
     try:
         w.get_indicator('ZZZ', 'NY.GDP.MKTP.CD')
@@ -170,6 +216,9 @@ def t_worldbank():
     except ValueError as e:
         check('erreur HTTP 200 detectee', True, str(e)[:60])
     except Exception as e:
+        if is_upstream_outage(e):
+            skip('t_worldbank (3 assertions)', 'panne amont en cours de test')
+            return
         check('erreur HTTP 200 detectee', False, type(e).__name__)
     got = w.get_latest_value('SDN', 'SP.POP.TOTL')
     check('mrnev fonctionne (per_page retire)', bool(got),
@@ -224,9 +273,13 @@ def main():
         try:
             fn()
         except Exception as e:
-            FAIL.append(fn.__name__)
-            print('  [FAIL] {} a leve : {}: {}'.format(fn.__name__, type(e).__name__,
-                                                       str(e)[:110]))
+            if is_upstream_outage(e):
+                skip(fn.__name__, 'panne amont : {}: {}'.format(
+                    type(e).__name__, str(e)[:70]))
+            else:
+                FAIL.append(fn.__name__)
+                print('  [FAIL] {} a leve : {}: {}'.format(fn.__name__, type(e).__name__,
+                                                           str(e)[:110]))
     print()
     print('=' * 74)
     print('{} OK / {} FAIL / {} SKIP en {:.0f} s'.format(

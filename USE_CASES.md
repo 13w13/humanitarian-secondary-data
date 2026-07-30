@@ -1,4 +1,4 @@
-# Use cases — four personas, four verified walkthroughs
+# Use cases: four personas, four verified walkthroughs
 
 > Every command and output below was **actually run on 2026-07-25**. Nothing is
 > hypothetical. Where a walkthrough exposed a packaging bug, the bug was fixed the
@@ -6,7 +6,7 @@
 
 ---
 
-## 1. Information Management Officer — "I need the data files"
+## 1. Information Management Officer: "I need the data files"
 
 *Goal: get the latest DTM datasets for Sudan onto disk, without reading any code.*
 
@@ -31,7 +31,7 @@ Result: `2026_24_05_DTM_SDN_IDPs_Returnees_Snapshot_006_Public_v1.xlsx` on disk.
 Lebanon behaves differently on purpose: its 60 catalogue rows are all gated, the
 tool says so, and points to the published report for the headline figure.
 
-## 2. Project manager — "one figure for my monthly report"
+## 2. Project manager: "one figure for my monthly report"
 
 *Goal: the latest displacement figure for Lebanon, safe to paste in a sitrep.*
 
@@ -47,11 +47,11 @@ python -X utf8 scripts/explore.py LBN        # ~7 s
      2026-07-23 | PDF (7 pages) | reliefweb.int/node/4222775
 ```
 
-The figure comes as a **sentence with its date and URL** — paste all three. The
+The figure comes as a **sentence with its date and URL**, so paste all three. The
 tool also warns that the producer's API would say 64,417 (October 2025, 8.8
 months stale): the number a naive integration would have used.
 
-## 3. MEAL / regional advisor — "what is the situation, who is affected?"
+## 3. MEAL / regional advisor: "what is the situation, who is affected?"
 
 *Goal: an analytical read on Venezuela after the June earthquake.*
 
@@ -62,15 +62,15 @@ d = analytical_findings('VEN', source='ACAPS')
 
 Output (real): the ACAPS Thematic Report of 2026-07-03, read from the **14-page
 PDF** (the ReliefWeb summary is a 1,658-character teaser), naming the affected
-groups — `people with disabilities, older people, pregnant, lactating, children,
-girls, women, refugees` — and figures with their inline sources
+groups (`people with disabilities, older people, pregnant, lactating, children,
+girls, women, refugees`) and figures with their inline sources
 (`6.6 million people felt the earthquake... (OCHA 29/06/2026; ...)`).
 
 Everything is tagged `epistemic_status: analysis`: these are a third party's
 findings, to be quoted as **"ACAPS estimates that..."**, never as your own
 measurement.
 
-## 4. IM analyst — "let me verify and chart it myself"
+## 4. IM analyst: "let me verify and chart it myself"
 
 *Goal: from raw file to a presentable chart, with the reading validated first.*
 
@@ -89,7 +89,7 @@ python -X utf8 scripts/quick_chart.py "<the xlsx>" --out chart.png
 The checksum against the published report is the step that matters: **reproduce a
 published figure before computing anything new**. Once it passes (5/5 exact across
 2 files and 2 countries so far), the same file yields what IOM never published:
-per-crossing-point breakdowns, rolling windows, yearly cumulative — and the chart
+per-crossing-point breakdowns, rolling windows, yearly cumulative, and the chart
 `analysis/chart_afg_flows.png` (30 months of weekly border flows, the mid-2025
 mass-return spike from Iran plainly visible).
 
@@ -106,6 +106,6 @@ mass-return spike from Iran plainly visible).
 | `quick_chart` column pick | charted `Total Male` instead of `Total Headcount` | patterns tried by priority, most specific first |
 
 Two lessons worth keeping: **a test suite proves the code works, only a persona
-walkthrough proves someone can use it** — and every one of these bugs failed
+walkthrough proves someone can use it**, and every one of these bugs failed
 *silently* (empty scan, wrong column), which is exactly the failure mode this
 repository exists to fight.
