@@ -22,8 +22,7 @@ from urllib.request import Request, urlopen
 
 from config import (
     RELIEFWEB_BASE, RELIEFWEB_APPNAME,
-    DEFAULT_TIMEOUT, RATE_LIMIT_DELAY, USER_AGENT
-)
+    DEFAULT_TIMEOUT, RATE_LIMIT_DELAY, USER_AGENT, get_credential)
 
 
 class ReliefWebClient:
@@ -34,10 +33,9 @@ class ReliefWebClient:
         # Pre-approved appname (required since 2025-11-01): keyring, then env,
         # then the generic config fallback. Personal appnames stay out of the
         # published config.py.
-        import keyring
         self.appname = (appname
-                        or keyring.get_password('sds.reliefweb', 'appname')
-                        or os.environ.get('RELIEFWEB_APPNAME')
+                        or get_credential('sds.reliefweb', 'appname',
+                                          'RELIEFWEB_APPNAME')
                         or RELIEFWEB_APPNAME)
 
     def _post(self, endpoint, payload):

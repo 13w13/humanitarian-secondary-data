@@ -25,7 +25,7 @@ import json
 from urllib.request import Request, urlopen
 from urllib.parse import urlencode
 
-from config import DEFAULT_TIMEOUT, USER_AGENT, save_csv
+from config import DEFAULT_TIMEOUT, USER_AGENT, save_csv, get_credential
 
 IDMC_REST_BASE = 'https://helix-tools-api.idmcdb.org/external-api'
 
@@ -39,9 +39,9 @@ class IDMCClient:
 
     def __init__(self, client_id=None):
         self.base = IDMC_REST_BASE
-        # keyring first, then env var fallback
-        import keyring
-        self.client_id = client_id or keyring.get_password('sds.idmc', 'client_id') or os.environ.get('IDMC_CLIENT_ID', '')
+        # OS keychain first, then env var. No hard keyring dependency.
+        self.client_id = client_id or get_credential(
+            'sds.idmc', 'client_id', 'IDMC_CLIENT_ID')
         if not self.client_id:
             print('  IDMC: No credentials — IDMC queries will be skipped.')
             print('  Set via: keyring sds.idmc/client_id or env var IDMC_CLIENT_ID')

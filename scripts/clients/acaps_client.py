@@ -20,7 +20,8 @@ from urllib.request import Request, urlopen
 from urllib.parse import urlencode
 
 from config import (
-    ACAPS_BASE, DEFAULT_TIMEOUT, RATE_LIMIT_DELAY, USER_AGENT, save_csv
+    ACAPS_BASE, DEFAULT_TIMEOUT, RATE_LIMIT_DELAY, USER_AGENT, save_csv,
+    get_credential
 )
 
 
@@ -34,9 +35,9 @@ class ACAPSClient:
 
     def __init__(self, api_key=None):
         self.base = ACAPS_BASE
-        # keyring first, then env var fallback
-        import keyring
-        self.api_key = api_key or keyring.get_password('sds.acaps', 'api_key') or os.environ.get('ACAPS_API_KEY', '')
+        # OS keychain first, then env var. No hard keyring dependency.
+        self.api_key = api_key or get_credential(
+            'sds.acaps', 'api_key', 'ACAPS_API_KEY')
 
     def _get(self, endpoint, params=None):
         """GET request to ACAPS API."""

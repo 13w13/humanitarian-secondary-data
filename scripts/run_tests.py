@@ -27,6 +27,9 @@ sys.path.insert(0, os.path.join(HERE, 'clients'))
 
 # nom court -> (module, description)
 SUITES = {
+    # HORS RESEAU et instantanee : a lancer en premier quand on doute d'une modif.
+    'hard': ('test_hardening',
+             'Robustesse hors reseau : ISO3, credentials, extras, telechargeur'),
     'dtm': ('test_dtm_e2e',
             'Catalogue DTM, lecture de fichiers, somme de controle, resolveur'),
     'p0': ('test_p0_e2e',
@@ -45,7 +48,9 @@ def main(argv):
         return 0
 
     # Par defaut : les suites RAPIDES. skill50 (~4 min) se demande explicitement.
-    wanted = [a for a in argv if not a.startswith('-')] or ['dtm', 'p0']
+    # `hard` d'abord : elle ne touche pas le reseau, donc si elle casse le probleme
+    # est chez nous, et il est inutile d'attendre 90 s d'appels API pour le voir.
+    wanted = [a for a in argv if not a.startswith('-')] or ['hard', 'dtm', 'p0']
     unknown = [w for w in wanted if w not in SUITES]
     if unknown:
         print('Suite(s) inconnue(s) : {}. Disponibles : {}'.format(

@@ -92,7 +92,8 @@ def main(argv):
     # Y a-t-il une colonne de sens (Inflow/Outflow) a tracer en 2 series ?
     dir_col = next((c for c in cols if c.lower() in ('direction', 'sens')), None)
 
-    import matplotlib
+    from config import require_module
+    matplotlib = require_module('matplotlib', 'Drawing a chart')
     matplotlib.use('Agg')
     import matplotlib.pyplot as plt
     from matplotlib.ticker import FuncFormatter

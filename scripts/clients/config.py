@@ -102,6 +102,75 @@ RATE_LIMIT_DELAY = 0.5  # seconds between API calls
 import csv
 import os
 
+
+def get_credential(service, field, *env_vars):
+    """Resolve one credential: OS keychain first, then environment variables.
+
+    Why this exists rather than `import keyring` in every client. The README
+    promises the toolkit runs with no `pip install`, and `keyring` is not in the
+    standard library. Six clients imported it at call time without a guard, so on
+    a machine without keyring the failure was a raw ModuleNotFoundError from
+    inside a constructor, which reads like a broken toolkit rather than a missing
+    optional extra. Here a missing keyring simply means "no keychain available,
+    use the environment".
+
+    Returns '' when nothing is set, so callers can treat empty as "not configured"
+    without distinguishing absent-keyring from absent-secret.
+    """
+    try:
+        import keyring
+    except Exception:                      # not installed, or no usable backend
+        pass
+    else:
+        try:
+            got = keyring.get_password(service, field)
+            if got:
+                return got
+        except Exception:                  # locked keychain, D-Bus absent, etc.
+            pass
+    for name in env_vars:
+        got = os.environ.get(name)
+        if got:
+            return got
+    return ''
+
+
+def normalize_iso3(value):
+    """Validate and upper-case an ISO 3166-1 alpha-3 code, or raise ValueError.
+
+    The country code reaches `os.path.join(PROJECT_DIR, '{}_data')`, so it becomes
+    part of a filesystem path. Typed by hand at a prompt that is harmless. Reached
+    by an agent that resolves a country from a chat message, or worse from text it
+    extracted out of a downloaded report, it is untrusted input on a path, and
+    `../..` would write outside the project. Three letters, nothing else.
+    """
+    got = str(value or '').strip().upper()
+    if len(got) != 3 or not got.isalpha() or not got.isascii():
+        raise ValueError(
+            'Not an ISO3 country code: {!r}. Expected three ASCII letters, '
+            'for example SDN, LBN or UKR.'.format(value))
+    return got
+
+
+def require_module(name, feature, install=None):
+    """Import an optional dependency, or fail with an instruction instead of a trace.
+
+    The core is standard library only. A handful of features are not: reading
+    workbooks (openpyxl), reading PDFs (pymupdf), drawing charts (matplotlib).
+    Those imports stay inside the functions that need them, so the toolkit still
+    imports and runs without them. What was missing is a usable message when one
+    is absent.
+    """
+    try:
+        return __import__(name)
+    except ImportError:
+        raise ImportError(
+            '{} needs the optional package "{}", which is not installed.\n'
+            '    pip install {}\n'
+            'The rest of the toolkit does not need it: the core is standard '
+            'library only, and only this feature is unavailable.'.format(
+                feature, name, install or name))
+
 # Columns legitimately empty for some countries/periods: do not warn on these.
 # Keep this list SHORT and justified — it is the escape hatch, not a dumping ground.
 EXPECTED_SPARSE = {

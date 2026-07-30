@@ -85,9 +85,9 @@ def census_reliefweb(iso3):
     sur HDX. Il rend des RAPPORTS, pas des fichiers : il sert a savoir QUI a une MSNA et
     QUAND, ce que HDX sous-couvre lourdement.
     """
-    import keyring
     from urllib.request import Request
-    app = keyring.get_password('sds.reliefweb', 'appname') or ''
+    from config import get_credential
+    app = get_credential('sds.reliefweb', 'appname', 'RELIEFWEB_APPNAME')
     rows = []
     for src in ('REACH', 'IMPACT Initiatives'):
         payload = {

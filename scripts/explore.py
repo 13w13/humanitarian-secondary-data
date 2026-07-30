@@ -38,7 +38,8 @@ def hr(title):
 
 
 def explore(iso3, topic='dtm'):
-    iso3 = iso3.upper()
+    from config import normalize_iso3
+    iso3 = normalize_iso3(iso3)
     t0 = time.time()
     print('EXPLORATION — {} (sujet : {})'.format(iso3, topic))
 

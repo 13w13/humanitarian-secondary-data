@@ -26,7 +26,8 @@ import time
 from urllib.request import Request, urlopen
 from urllib.parse import urlencode
 
-from config import DEFAULT_TIMEOUT, RATE_LIMIT_DELAY, USER_AGENT, save_csv
+from config import (DEFAULT_TIMEOUT, RATE_LIMIT_DELAY, USER_AGENT, save_csv,
+                    get_credential)
 
 ACLED_TOKEN_URL = 'https://acleddata.com/oauth/token'
 ACLED_DATA_URL = 'https://acleddata.com/api/acled/read'
@@ -44,9 +45,10 @@ class ACLEDClient:
     ]
 
     def __init__(self, email=None, password=None):
-        import keyring
-        self.email = email or keyring.get_password('sds.acled', 'email') or os.environ.get('ACLED_EMAIL', '')
-        self.password = password or keyring.get_password('sds.acled', 'password') or os.environ.get('ACLED_PASSWORD', '')
+        self.email = email or get_credential(
+            'sds.acled', 'email', 'ACLED_EMAIL')
+        self.password = password or get_credential(
+            'sds.acled', 'password', 'ACLED_PASSWORD')
         if not self.email or not self.password:
             raise ValueError(
                 'ACLED requires email + password. Set via:\n'

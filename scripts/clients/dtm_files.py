@@ -104,7 +104,8 @@ def _pick_data_sheet(wb):
 
 
 def _load(path, sheet=None, max_row=None):
-    import openpyxl
+    from config import require_module
+    openpyxl = require_module('openpyxl', 'Reading a downloaded workbook')
     wb = openpyxl.load_workbook(path, read_only=True, data_only=True)
     names = wb.sheetnames
     why = None

@@ -49,15 +49,41 @@ Try `SDN` (data is open, 8.7M IDPs cited from a 35-page PDF) or `PSE` (no DTM co
 ```bash
 python -X utf8 scripts/health_check.py SDN         # are the 17 sources reachable?
 python -X utf8 scripts/fetch_country_data.py SDN   # pull everything to CSV
-python -X utf8 scripts/run_tests.py                # 57 assertions, no pytest needed
+python -X utf8 scripts/run_tests.py hard           # 31 assertions, offline, instant
+python -X utf8 scripts/run_tests.py                # 87 assertions, no pytest needed
 python -X utf8 scripts/run_tests.py skill50        # 50 end-to-end scenarios (~4 min)
 ```
 
-The suites call the real APIs, so they are slow and they depend on other people's
-uptime. A provider outage or a missing optional key reports as SKIP; FAIL is reserved
-for something that is actually our fault. If you see FAIL, it is a real finding.
+Start with `hard`: it makes no network request, so it runs in under a second, and if
+it fails the problem is ours. The other suites call the real APIs, so they are slow
+and they depend on other people's uptime. A provider outage or a missing optional key
+reports as SKIP; FAIL is reserved for something that is actually our fault. If you
+see FAIL, it is a real finding.
 
-**Requirements**: Python 3.8+. Standard library only, so no pip install. Some sources need a free key (ACLED, ACAPS, IDMC, DTM API); everything in the quick start above works without one.
+### Requirements
+
+Python 3.8+. **Fetching data needs nothing but the standard library**, so the quick
+start above runs on a locked-down machine with no `pip install` and no API key.
+
+Four features reach beyond the standard library. Each imports its dependency only
+when you call it, so a missing package disables that one feature and nothing else,
+and it says so rather than raising a traceback.
+
+| Feature | Needs | Without it |
+|---|---|---|
+| Store keys in the OS keychain | `keyring` | Keys are read from environment variables instead |
+| Read a downloaded workbook | `openpyxl` | Fetching and cataloguing still work |
+| Read a report PDF | `pymupdf` | Report body text is used when available |
+| Draw a chart | `matplotlib` | Figures are still returned as text |
+
+```bash
+pip install keyring openpyxl pymupdf matplotlib    # only if you want all four
+```
+
+Some sources need a free key (ACLED, ACAPS, IDMC, DTM API). Set it in the keychain
+under service `sds.{provider}`, or export the matching environment variable
+(`ACLED_EMAIL`, `ACAPS_API_KEY`, `IDMC_CLIENT_ID`, `DTM_SUBSCRIPTION_KEY`). Nothing
+is read from a command-line argument, so no secret lands in your shell history.
 
 ## Parameters
 
@@ -127,7 +153,8 @@ scripts/
 ├── quick_chart.py                 # a downloaded DTM file → a PNG chart
 ├── msna_census.py                 # locate MSNA products across three channels
 ├── wgss_probe.py                  # read a workbook's column names, never its values
-├── run_tests.py                   # test runner (three suites, stdlib only)
+├── run_tests.py                   # test runner (four suites, stdlib only)
+├── test_hardening.py              # the offline suite: run this one first
 └── clients/
     ├── recipes.py                 # eight one-call indicators, with caveats
     ├── report_figures.py          # resolve a figure across the four layers
@@ -139,6 +166,7 @@ scripts/
 references/                        # lookup tables and API notes, versioned
 examples/                          # sample output you can read without running anything
 USE_CASES.md                       # four reader profiles, walked through a real session
+SECURITY.md                        # credentials, downloaded content, personal data
 
 {ISO3}_data/                       # output (created automatically, one per country)
 ├── data_inventory.csv             # index of everything fetched

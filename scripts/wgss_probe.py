@@ -44,7 +44,8 @@ WG_GENERIC = re.compile(r'\bwg.?q?.?(ss)?[_\- ]?\d|\bwg[_\- ]?ss\b|washington', 
 
 def _read_headers(path):
     """Noms de colonnes de chaque feuille, SANS lire les valeurs."""
-    import openpyxl
+    from config import require_module
+    openpyxl = require_module('openpyxl', 'Reading a workbook\'s column names')
     wb = openpyxl.load_workbook(path, read_only=True, data_only=True)
     sheets = {}
     for name in wb.sheetnames:

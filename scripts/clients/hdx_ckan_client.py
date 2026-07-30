@@ -21,7 +21,8 @@ import os
 import time
 from urllib.request import Request, urlopen
 
-from config import HDX_CKAN_BASE, DEFAULT_TIMEOUT, RATE_LIMIT_DELAY, USER_AGENT
+from config import (HDX_CKAN_BASE, DEFAULT_TIMEOUT, RATE_LIMIT_DELAY, USER_AGENT,
+                    get_credential)
 
 
 class HDXClient:
@@ -32,8 +33,7 @@ class HDXClient:
         if api_key:
             self.api_key = api_key
         else:
-            import keyring
-            self.api_key = keyring.get_password('sds.hdx', 'api_key') or ''
+            self.api_key = get_credential('sds.hdx', 'api_key', 'HDX_API_KEY')
 
     def _get(self, action, params=''):
         """GET request to CKAN API."""

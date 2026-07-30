@@ -1163,7 +1163,13 @@ def main():
     parser.add_argument('--max-pages', type=int, default=200, help='Max pagination pages for Liveuamap (default 200)')
     args = parser.parse_args()
 
-    iso3 = args.iso3.upper()
+    # Validated, not just upper-cased: this value becomes a directory name below.
+    from config import normalize_iso3
+    try:
+        iso3 = normalize_iso3(args.iso3)
+    except ValueError as e:
+        print(e)
+        return 2
     # Output: {ISO3}_data/ with raw/ and catalogue/ subdirs
     base_dir = args.output_dir or os.path.join(PROJECT_DIR, '{}_data'.format(iso3))
     output_dir = os.path.join(base_dir, 'raw')           # raw data CSVs
@@ -1279,4 +1285,6 @@ def main():
 
 
 if __name__ == '__main__':
-    main()
+    # sys.exit so a rejected country code returns a non-zero status to the caller
+    # (a shell loop, a CI step, or an agent) instead of looking like a clean run.
+    sys.exit(main())

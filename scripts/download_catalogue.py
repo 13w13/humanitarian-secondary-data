@@ -126,17 +126,65 @@ def _headers_for(url):
     return {'User-Agent': USER_AGENT}
 
 
-def _download_file(url, dest_path, timeout=DEFAULT_TIMEOUT):
-    """Download a file with streaming write. Returns (success, size_or_error)."""
-    import shutil
+# A single resource that legitimately exceeds this is a signal, not a routine case:
+# the biggest DTM workbooks observed are a few tens of MB. The cap exists so a
+# misbehaving or misconfigured host cannot fill a field laptop's disk.
+MAX_DOWNLOAD_BYTES = 512 * 1024 * 1024
+DOWNLOAD_CHUNK = 256 * 1024
+
+
+def _download_file(url, dest_path, timeout=DEFAULT_TIMEOUT,
+                   max_bytes=MAX_DOWNLOAD_BYTES):
+    """Download to a temporary file, then move it into place atomically.
+
+    Returns (success, size_or_error).
+
+    Why not write straight to dest_path. A dropped connection used to leave a
+    truncated file at the final path, and a truncated XLSX still opens: openpyxl
+    reads it, `sum_by` sums it, and the total is quietly short. That is precisely
+    the failure this toolkit exists to prevent, so a partial download must never
+    be reachable under the name the rest of the pipeline reads. We stream into
+    `.part`, then `os.replace`, which is atomic on the same filesystem. On any
+    failure the partial file is removed rather than left to be mistaken for data.
+
+    Only http and https are accepted: a catalogue CSV is data from a remote API,
+    so a `file://` or other scheme in a URL column must not be dereferenced.
+    """
+    if not url.lower().startswith(('http://', 'https://')):
+        return False, 'refused scheme (only http/https): {}'.format(url[:80])
+
+    tmp_path = dest_path + '.part'
     req = Request(url, headers=_headers_for(url))
     try:
         resp = urlopen(req, timeout=timeout)
+        # Trust the declared length only to fail EARLY; the real check is the
+        # running total below, since Content-Length can lie or be absent.
+        declared = resp.headers.get('Content-Length')
+        if declared and declared.isdigit() and int(declared) > max_bytes:
+            return False, 'declared size {:,} B exceeds cap {:,} B'.format(
+                int(declared), max_bytes)
+
         os.makedirs(os.path.dirname(os.path.abspath(dest_path)), exist_ok=True)
-        with open(dest_path, 'wb') as f:
-            shutil.copyfileobj(resp, f)
-        return True, os.path.getsize(dest_path)
+        written = 0
+        with open(tmp_path, 'wb') as f:
+            while True:
+                chunk = resp.read(DOWNLOAD_CHUNK)
+                if not chunk:
+                    break
+                written += len(chunk)
+                if written > max_bytes:
+                    raise OSError('exceeded cap {:,} B while streaming'.format(max_bytes))
+                f.write(chunk)
+        if written == 0:
+            raise OSError('empty response body')
+        os.replace(tmp_path, dest_path)          # atomic on the same filesystem
+        return True, written
     except (HTTPError, URLError, OSError) as e:
+        try:
+            if os.path.exists(tmp_path):
+                os.remove(tmp_path)
+        except OSError:
+            pass
         return False, str(e)
 
 
