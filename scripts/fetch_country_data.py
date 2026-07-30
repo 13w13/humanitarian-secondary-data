@@ -117,14 +117,24 @@ def _make_result(source, category, total_records, disability_records, note,
 
 
 def save_csv(rows, filepath, fieldnames):
-    """Save list of dicts to CSV. Retries once on PermissionError (OneDrive lock)."""
+    """Save list of dicts to CSV. Retries on PermissionError (OneDrive lock).
+
+    Delegates the empty/phantom-column audit to `config.audit_columns` so that
+    BOTH write paths of this repo (this one, 43 call sites, and the clients'
+    `config.save_csv` used by ACLED/ACAPS) share one gate. Uses
+    extrasaction='ignore' so a client can return extra keys without raising
+    against the frozen header below (review 2026-07-25).
+    """
+    from config import audit_columns
     parent = os.path.dirname(os.path.abspath(filepath))
     if parent:
         os.makedirs(parent, exist_ok=True)
+    audit_columns(rows, filepath)
     for attempt in range(3):
         try:
             with open(filepath, 'w', newline='', encoding='utf-8') as f:
-                writer = csv.DictWriter(f, fieldnames=fieldnames)
+                writer = csv.DictWriter(f, fieldnames=fieldnames,
+                                        extrasaction='ignore')
                 writer.writeheader()
                 writer.writerows(rows)
             print('  Saved {} rows -> {}'.format(len(rows), os.path.basename(filepath)))
@@ -369,7 +379,7 @@ def fetch_hapi(iso3, output_dir, date_from=None, date_to=None):
             all_dates.extend(r.get('date_start', '') for r in prices)
 
     if 'baseline-population' in avail:
-        pop = hapi.get_baseline_population(iso3)  # Reference — NOT filtered
+        pop = hapi.get_baseline_population(iso3)  # Reference - NOT filtered
         print('  Baseline Population: {} records'.format(len(pop)))
         if pop:
             save_csv(pop, os.path.join(output_dir, 'hapi_population.csv'),
@@ -379,42 +389,52 @@ def fetch_hapi(iso3, output_dir, date_from=None, date_to=None):
             summary_parts.append('{} population'.format(len(pop)))
             total += len(pop)
 
-    # Humanitarian Needs — KEY FOR HI: contains disabled_marker field
+    # Humanitarian Needs - KEY FOR HI: v2 `category` field carries ALL
+    # disaggregation, including category='Disability' (see hapi_client docstring)
     disability_records = 0
     if 'humanitarian-needs' in avail:
         hum_needs = _filter_by_period(hapi.get_humanitarian_needs(iso3))
         print('  Humanitarian Needs: {} records'.format(len(hum_needs)))
         if hum_needs:
             save_csv(hum_needs, os.path.join(output_dir, 'hapi_humanitarian_needs.csv'),
-                     ['location_code', 'admin1_name', 'admin2_name', 'sector_name',
-                      'population_group', 'population_status', 'gender', 'age_range',
-                      'disabled_marker', 'population', 'date_start', 'date_end'])
+                     ['location_code', 'admin1_name', 'admin2_name', 'admin_level',
+                      'sector_code', 'sector_name', 'category', 'population_status',
+                      'population', 'date_start', 'date_end', 'resource_hdx_id'])
             files.append('hapi_humanitarian_needs.csv')
             summary_parts.append('{} humanitarian needs'.format(len(hum_needs)))
             total += len(hum_needs)
             all_dates.extend(r.get('date_start', '') for r in hum_needs)
-            # Disability disaggregation analysis
-            disabled_y = [r for r in hum_needs if r.get('disabled_marker') == 'y']
-            disabled_pop = sum(int(r.get('population', 0) or 0) for r in disabled_y)
-            if disabled_y:
-                disability_records = len(disabled_y)
-                print('  ** DISABILITY: {} records with disabled_marker=y (pop {:,})'.format(
-                    len(disabled_y), disabled_pop))
+            # Disability disaggregation (v2: category label VARIES per HNO
+            # vintage: 'Disability' in 2024, 'People with disability' in 2025)
+            disabled_rows = [r for r in hum_needs
+                             if 'disab' in (r.get('category') or '').lower()]
+            disabled_inn = sum(int(r.get('population', 0) or 0) for r in disabled_rows
+                               if r.get('population_status') == 'INN')
+            if disabled_rows:
+                disability_records = len(disabled_rows)
+                print('  ** DISABILITY: {} rows with category=Disability '
+                      '(in-need pop {:,} across periods - dedupe by period before use)'.format(
+                          len(disabled_rows), disabled_inn))
             else:
                 print('  ** No disability-disaggregated records found')
 
     if 'returnees' in avail:
-        returnees = _filter_by_period(hapi.get_returnees(iso3))
-        print('  Returnees: {} records'.format(len(returnees)))
+        # returnees = a FLOW origin x asylum, not a country stock. We ask for
+        # people returning TO iso3 (origin_location_code). The previous code
+        # filtered on location_code, which is not a parameter of this endpoint,
+        # and therefore collected the whole world and summed it.
+        returnees = _filter_by_period(hapi.get_returnees(iso3, direction='origin'))
+        print('  Returnees (to {}): {} records'.format(iso3, len(returnees)))
         if returnees:
             save_csv(returnees, os.path.join(output_dir, 'hapi_returnees.csv'),
-                     ['location_code', 'admin1_name', 'admin2_name',
-                      'origin_location_code', 'origin_location_name',
+                     ['origin_location_code', 'origin_location_name',
+                      'asylum_location_code', 'asylum_location_name',
                       'population_group', 'gender', 'age_range',
-                      'population', 'date_start', 'date_end'])
+                      'min_age', 'max_age', 'population',
+                      'date_start', 'date_end', 'resource_hdx_id'])
             files.append('hapi_returnees.csv')
-            total_ret_pop = sum(int(r.get('population', 0) or 0) for r in returnees)
-            summary_parts.append('{} returnees (pop {:,})'.format(len(returnees), total_ret_pop))
+            # No summed population: rows repeat per group/gender/age/period.
+            summary_parts.append('{} returnee rows'.format(len(returnees)))
             total += len(returnees)
             all_dates.extend(r.get('date_start', '') for r in returnees)
 
@@ -477,7 +497,7 @@ def fetch_hdx_ckan(iso3, output_dir):
                 'dataset_name': ds['name'],
                 'dataset_title': ds['title'],
                 'org': ds['org'],
-                'dataset_date': ds['date'],
+                'dataset_date': ds.get('metadata_modified', ''),
                 'license': ds.get('license', ''),
                 'num_resources': ds['num_resources'],
                 'formats': ', '.join(sorted(formats)),
@@ -561,22 +581,49 @@ def fetch_unhcr(iso3, output_dir, date_from=None):
 
     year_from = int(date_from[:4]) if date_from else 2018
 
+    # Column names mirror UNHCR's own taxonomy (coa/coo family) so outputs join
+    # with the official `refugees` R package and Refugee Data Finder exports.
+    # The pre-2026-07-25 aliases (country_asylum, country_origin) were the bug.
+    POP_COLS = ['year', 'coa', 'coa_iso', 'coa_name', 'coo', 'coo_iso', 'coo_name',
+                'refugees', 'asylum_seekers', 'returned_refugees', 'idps',
+                'returned_idps', 'stateless', 'oip', 'ooc', 'hst']
     pop = unhcr.get_population(country_asylum=iso3, year_from=year_from)
-    print('  Population records: {}'.format(len(pop)))
+    print('  Population records (asylum): {}'.format(len(pop)))
     total = 0
     if pop:
-        save_csv(pop, os.path.join(output_dir, 'unhcr_population.csv'),
-                 ['year', 'country_asylum', 'country_asylum_name', 'country_origin',
-                  'country_origin_name', 'refugees', 'asylum_seekers', 'idps',
-                  'stateless', 'oip', 'ooc', 'hst'])
+        save_csv(pop, os.path.join(output_dir, 'unhcr_population.csv'), POP_COLS)
         files.append('unhcr_population.csv')
         total += len(pop)
+
+    # Origin direction: "nationals of {iso3} displaced anywhere" is a different
+    # question from "people hosted in {iso3}". For a crisis like Sudan both
+    # matter, and we used to ship neither.
+    pop_origin = unhcr.get_population(country_origin=iso3, year_from=year_from)
+    print('  Population records (origin): {}'.format(len(pop_origin)))
+    if pop_origin:
+        save_csv(pop_origin,
+                 os.path.join(output_dir, 'unhcr_population_origin.csv'), POP_COLS)
+        files.append('unhcr_population_origin.csv')
+        total += len(pop_origin)
+
+    # get_demographics() existed but was never called: the repo extracted zero
+    # age/sex disaggregation from UNHCR despite HI doctrine requiring SADD.
+    demo = unhcr.get_demographics(iso3)
+    print('  Demographics records: {}'.format(len(demo)))
+    if demo:
+        save_csv(demo, os.path.join(output_dir, 'unhcr_demographics.csv'),
+                 ['year', 'coa', 'coa_iso', 'coa_name', 'coo', 'coo_iso',
+                  'female_0_4', 'female_5_11', 'female_12_17', 'female_18_59',
+                  'female_60_plus', 'male_0_4', 'male_5_11', 'male_12_17',
+                  'male_18_59', 'male_60_plus', 'total'])
+        files.append('unhcr_demographics.csv')
+        total += len(demo)
 
     solutions = unhcr.get_solutions(country_asylum=iso3, year_from=year_from)
     print('  Solutions records: {}'.format(len(solutions)))
     if solutions:
         save_csv(solutions, os.path.join(output_dir, 'unhcr_solutions.csv'),
-                 ['year', 'country_asylum', 'country_origin', 'returned_refugees',
+                 ['year', 'coa', 'coa_iso', 'coo', 'coo_iso', 'returned_refugees',
                   'resettlement', 'naturalisation', 'complementary_pathways'])
         files.append('unhcr_solutions.csv')
         total += len(solutions)
@@ -642,8 +689,8 @@ def fetch_inform(iso3, output_dir):
         total_records=total,
         disability_records=0,
         files=files,
-        note='Risk {:.1f}, {} subnational units'.format(
-            risk.get('overall_risk', 0) if risk else 0, len(subnational)),
+        note=('Risk {:.1f}, {} subnational units'.format(risk['overall_risk'], len(subnational))
+              if risk else 'INFORM API restructured (JRC) - national risk via HAPI national-risk'),
     )
 
 
@@ -720,7 +767,7 @@ def fetch_acled(iso3, output_dir, date_from=None, date_to=None):
         return _make_result(
             source='ACLED', category='raw',
             total_records=0, disability_records=0,
-            note='Skipped — no API key',
+            note='Skipped - no API key',
         )
 
     files = []
@@ -807,7 +854,7 @@ def fetch_dtm(iso3, output_dir):
     country_name = COUNTRY_NAMES.get(iso3, iso3.lower())
     print('\n--- IOM DTM ---')
 
-    datasets = dtm.search_dtm_datasets(country_name)
+    datasets = dtm.search_dtm_datasets(country_name, iso3=iso3)
     print('  DTM datasets on HDX: {}'.format(len(datasets)))
 
     files = []
@@ -844,14 +891,19 @@ def fetch_gdacs(iso3, output_dir, date_from=None):
     else:
         days = 180
 
-    alerts = gdacs.get_recent_by_country(country_name, days=days, limit=50)
+    # Filtrer par ISO3 : le chemin par NOM rendait 0 alerte en silence ('Phl').
+    alerts = gdacs.get_recent_by_iso3(iso3, days=days, limit=300)
     print('  Alerts (last {} days): {}'.format(days, len(alerts)))
 
     if alerts:
         save_csv(alerts, os.path.join(output_dir, 'gdacs_alerts.csv'),
                  ['event_id', 'event_type', 'event_type_name', 'alert_level',
                   'severity_value', 'severity_text', 'country', 'name',
-                  'date_start', 'date_end', 'lon', 'lat', 'population_affected', 'url'])
+                  'date_start', 'date_end', 'lon', 'lat', 'url',
+                  # colonnes ajoutees par le correctif GDACS (severite lue dans
+                  # severitydata, pays affectes en ISO3, evenements multi-pays)
+                  'severity_unit', 'alert_score', 'affected_iso3',
+                  'affected_countries', 'n_countries_affected', 'is_current', 'glide'])
         files.append('gdacs_alerts.csv')
 
     p_from, p_to = _extract_date_range(alerts, 'date_start') if alerts else ('', '')
@@ -923,7 +975,8 @@ def fetch_ifrcgo(iso3, output_dir):
         save_csv(events, os.path.join(output_dir, 'ifrcgo_emergencies.csv'),
                  ['event_id', 'name', 'dtype', 'status', 'num_affected', 'num_dead',
                   'num_injured', 'num_displaced', 'num_missing', 'date_start',
-                  'countries', 'glide', 'appeal_amount_requested', 'appeal_amount_funded'])
+                  'countries', 'glide', 'appeal_amount_requested_chf',
+                  'appeal_amount_funded_chf', 'currency'])
         total += len(events)
 
     appeals = ifrc.get_appeals(iso3=iso3, limit=50)
@@ -931,7 +984,7 @@ def fetch_ifrcgo(iso3, output_dir):
     if appeals:
         save_csv(appeals, os.path.join(output_dir, 'ifrcgo_appeals.csv'),
                  ['appeal_id', 'code', 'name', 'atype', 'status', 'country',
-                  'amount_requested', 'amount_funded', 'coverage_pct',
+                  'amount_requested_chf', 'amount_funded_chf', 'currency', 'coverage_pct',
                   'num_beneficiaries', 'start_date', 'end_date'])
         total += len(appeals)
 
@@ -1007,48 +1060,60 @@ def fetch_impact(iso3, output_dir):
     )
 
 
-def fetch_dtm_portal(iso3, output_dir):
-    """Fetch DTM datasets from portal (MSNA + all datasets for the country)."""
-    from dtm_client import DTMClient, PORTAL_COUNTRY_IDS
+def fetch_dtm_portal(iso3, output_dir, max_pages=3):
+    """Catalogue DTM du pays, AVEC les liens de telechargement directs.
+
+    Reecrit 2026-07-25 (test persona "IM qui telecharge"). L'ancienne version
+    scrapait titres+urls de FICHES sans lien de fichier : le flux
+    `01b_download.py` scannait donc "0 downloadable" alors que 95 % du catalogue
+    DTM est telechargeable. `browse_catalogue` porte `download_url` par ligne, et
+    `01b` detecte cette colonne -> le chemin catalogue -> selection ->
+    telechargement fonctionne enfin de bout en bout.
+    """
+    from dtm_client import DTMClient, UnmappedCountry
     dtm = DTMClient()
 
-    print('\n--- DTM Portal ---')
-    country_id = PORTAL_COUNTRY_IDS.get(iso3.upper())
-    if not country_id:
-        print('  No DTM portal country ID for {}'.format(iso3))
+    print('\n--- DTM Portal (catalogue) ---')
+    try:
+        rows = dtm.browse_catalogue(iso3, max_pages=max_pages)
+    except UnmappedCountry as e:
+        print('  {}'.format(str(e)[:100]))
         return _make_result(
             source='DTM Portal', category='catalogue',
             total_records=0, disability_records=0,
-            note='No portal country ID for {}'.format(iso3),
+            note='no DTM catalogue facet for {}'.format(iso3),
+        )
+    except Exception as e:
+        print('  DTM portal: {}'.format(str(e)[:100]))
+        return _make_result(
+            source='DTM Portal', category='catalogue',
+            total_records=0, disability_records=0,
+            note='portal error: {}'.format(str(e)[:80]),
         )
 
-    # 1. All datasets for the country
-    result = dtm.search_portal_datasets(country_id=country_id)
-    all_datasets = result['datasets']
-    print('  All datasets: {}'.format(len(all_datasets)))
-    if all_datasets:
-        save_csv(all_datasets, os.path.join(output_dir, 'dtm_portal_datasets.csv'),
-                 ['title', 'url', 'slug'])
-
-    # 2. MSNA specifically
-    msna = dtm.search_portal_msna(iso3)
-    print('  MSNA datasets: {}'.format(len(msna)))
-    if msna:
-        save_csv(msna, os.path.join(output_dir, 'dtm_portal_msna.csv'),
-                 ['title', 'url', 'slug'])
-
+    n_open = sum(1 for r in rows if r['access'] == 'open')
+    print('  {} datasets ({} telechargeables, {} verrouilles) sur {} page(s)'.format(
+        len(rows), n_open, len(rows) - n_open, max_pages))
     files = []
-    if all_datasets:
+    if rows:
+        save_csv(rows, os.path.join(output_dir, 'dtm_portal_datasets.csv'),
+                 ['slug', 'title', 'published', 'country_slug', 'activities',
+                  'dataset_format', 'access', 'download_url', 'url'])
         files.append('dtm_portal_datasets.csv')
+
+    msna = [r for r in rows
+            if 'msna' in (r['title'] + r['activities']).lower()
+            or 'needs assessment' in (r['title'] + r['activities']).lower()]
     if msna:
-        files.append('dtm_portal_msna.csv')
+        print('  dont MSNA / needs assessment : {}'.format(len(msna)))
 
     return _make_result(
         source='DTM Portal', category='catalogue',
-        total_records=len(all_datasets),
-        disability_records=len(msna),
+        total_records=len(rows),
+        disability_records=0,      # aucun produit DTM ne porte de ventilation handicap
         files=files,
-        note='{} datasets total, {} MSNA'.format(len(all_datasets), len(msna)),
+        note='{} datasets, {} downloadable ({} MSNA)'.format(
+            len(rows), n_open, len(msna)),
     )
 
 
@@ -1129,7 +1194,7 @@ def main():
             sources.remove('ifrcgo')
 
     print('=' * 60)
-    print('Secondary Data Sources — {} ({})'.format(iso3, datetime.now().strftime('%Y-%m-%d %H:%M')))
+    print('Secondary Data Sources - {} ({})'.format(iso3, datetime.now().strftime('%Y-%m-%d %H:%M')))
     print('Output: {}'.format(os.path.abspath(base_dir)))
     print('Sources: {}'.format(', '.join(sources)))
     if args.date_from:
@@ -1143,7 +1208,7 @@ def main():
     dt = args.date_to
     mp = args.max_pages
 
-    # Source dispatch — catalogue sources go to catalogue_dir, raw data to raw/
+    # Source dispatch - catalogue sources go to catalogue_dir, raw data to raw/
     # Note: ReliefWeb is catalogue but keeps date_from/date_to (we want period-filtered listings)
     dispatch = {
         'reliefweb': lambda: fetch_reliefweb(iso3, catalogue_dir, df, dt),
@@ -1179,16 +1244,16 @@ def main():
                 total_records=0, disability_records=0, note=str(e),
             ))
 
-    # Data inventory — 1 row per file across both dirs
+    # Data inventory - 1 row per file across both dirs
     inventory = build_inventory(summaries, output_dir, catalogue_dir)
     if inventory:
         save_csv(inventory, os.path.join(base_dir, 'data_inventory.csv'), INVENTORY_FIELDS)
 
     print('\n' + '=' * 60)
-    print('SUMMARY — {}'.format(iso3))
+    print('SUMMARY - {}'.format(iso3))
     print('=' * 60)
     for s in summaries:
-        print('  {} [{}] — {} records (disability: {}) | {}'.format(
+        print('  {} [{}] - {} records (disability: {}) | {}'.format(
             s['source'], s['category'], s['total_records'], s['disability_records'], s['note']))
 
     # List files
@@ -1198,12 +1263,12 @@ def main():
                        if f.endswith('.csv')] if os.path.isdir(catalogue_dir) else []
 
     if raw_files:
-        print('\nRaw — {} files'.format(len(raw_files)))
+        print('\nRaw - {} files'.format(len(raw_files)))
         for f in raw_files:
             size = os.path.getsize(os.path.join(output_dir, f))
             print('  {} ({:,} bytes)'.format(f, size))
     if catalogue_files:
-        print('\nCatalogue — {} files'.format(len(catalogue_files)))
+        print('\nCatalogue - {} files'.format(len(catalogue_files)))
         for f in catalogue_files:
             size = os.path.getsize(os.path.join(catalogue_dir, f))
             print('  {} ({:,} bytes)'.format(f, size))

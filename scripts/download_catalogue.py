@@ -53,6 +53,10 @@ URL_COLUMNS = {
     'impact_all_resources.csv': 'url',
     'impact_msna_datasets.csv': 'url',
     'dtm_datasets.csv': 'resource_url',
+    # Catalogue du portail DTM : `download_url` est le lien DIRECT du fichier
+    # (`url` est la fiche). Sans ce mapping, _detect_url_column prenait `url`
+    # en premier et tout le catalogue passait pour non telechargeable.
+    'dtm_portal_datasets.csv': 'download_url',
     'reliefweb_disability.csv': 'url',
 }
 
@@ -60,6 +64,10 @@ URL_COLUMNS = {
 DOWNLOADABLE_DOMAINS = [
     'repository.impact-initiatives.org',
     'data.humdata.org/dataset/',       # HDX resource direct links
+    # DTM sert ses fichiers via un tracker SANS extension dans l'URL
+    # (`/dtm_download_track/{id}?file=1&type=node&id=N` -> content-disposition
+    # xlsx). L'heuristique par extension le ratait -> 2 250 fichiers invisibles.
+    'dtm.iom.int/dtm_download_track/',
 ]
 
 # Domains that are listing pages, not direct downloads
@@ -72,7 +80,9 @@ LISTING_DOMAINS = [
 
 def _detect_url_column(header):
     """Find the URL column in a CSV header."""
-    for col in ['url', 'resource_url', 'hdx_url', 'download_url']:
+    # `download_url` d'ABORD : quand un CSV porte a la fois la fiche (`url`) et le
+    # lien direct (`download_url`), c'est le direct qu'on veut.
+    for col in ['download_url', 'resource_url', 'hdx_url', 'url']:
         if col in header:
             return col
     return None
@@ -99,10 +109,27 @@ def _safe_filename(url):
     return fname[:150] if fname else 'unknown'
 
 
+def _headers_for(url):
+    """Jeu d'en-tetes adapte a l'hote.
+
+    dtm.iom.int repond 403 a `humanitarian-secondary-data/1.0` ET a un UA Chrome nu :
+    seul un profil navigateur COHERENT passe (mesure 2026-07-25, meme URL meme
+    minute). Le client DTM porte deja ce profil ; on le reutilise ici au lieu de
+    laisser le downloader echouer avec l'UA generique.
+    """
+    if 'dtm.iom.int' in url:
+        try:
+            from dtm_client import PORTAL_HEADERS
+            return dict(PORTAL_HEADERS)
+        except Exception:
+            pass
+    return {'User-Agent': USER_AGENT}
+
+
 def _download_file(url, dest_path, timeout=DEFAULT_TIMEOUT):
     """Download a file with streaming write. Returns (success, size_or_error)."""
     import shutil
-    req = Request(url, headers={'User-Agent': USER_AGENT})
+    req = Request(url, headers=_headers_for(url))
     try:
         resp = urlopen(req, timeout=timeout)
         os.makedirs(os.path.dirname(os.path.abspath(dest_path)), exist_ok=True)

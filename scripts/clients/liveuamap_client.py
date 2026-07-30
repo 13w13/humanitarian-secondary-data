@@ -38,9 +38,9 @@ from config import DEFAULT_TIMEOUT, save_csv
 # --- Constants -----------------------------------------------------------
 
 LIVEUAMAP_PAGE_DELAY = 1.0   # seconds between pagination requests (country subdomains)
-_MAIN_DOMAIN_DELAY = 2.5     # higher delay for liveuamap.com (UKR) — avoids rate-limit retries
+_MAIN_DOMAIN_DELAY = 2.5     # higher delay for liveuamap.com (UKR) - avoids rate-limit retries
 LIVEUAMAP_MAX_PAGES = 200    # safety cap per region
-_REQUEST_TIMEOUT = 15        # per-request timeout (seconds) — shorter than DEFAULT_TIMEOUT to detect hangs
+_REQUEST_TIMEOUT = 15        # per-request timeout (seconds) - shorter than DEFAULT_TIMEOUT to detect hangs
 _MAX_RETRIES = 3             # retries per page on transient errors
 _MAX_CONSECUTIVE_ERRORS = 3  # stop pagination after N consecutive failures
 _PROGRESS_INTERVAL = 5       # print progress every N pages
@@ -64,7 +64,7 @@ EVENT_TYPES = {
     69: 'manpads',              # manpads (1)
     102: 'loitering_munition',  # shahed (108)
     97: 'fpv_drone',            # fpv (6)
-    96: 'cruise_missile',       # missile_flying (2) — mapped from old data
+    96: 'cruise_missile',       # missile_flying (2) - mapped from old data
     100: 'missile',             # missile_flying (2)
     105: 'air_alert',           # air_alert (7)
     # --- Military operations ---
@@ -242,8 +242,8 @@ class LiveuamapClient:
         Args:
             iso3: Country ISO3 code (e.g. 'SDN', 'SYR')
             max_pages: Max pagination depth (default LIVEUAMAP_MAX_PAGES)
-            date_from: Optional YYYY-MM-DD — stop pagination + filter events
-            date_to: Optional YYYY-MM-DD — filter events after this date
+            date_from: Optional YYYY-MM-DD - stop pagination + filter events
+            date_to: Optional YYYY-MM-DD - filter events after this date
 
         Returns:
             List of flat event dicts ready for CSV.
@@ -365,7 +365,7 @@ class LiveuamapClient:
                 page += 1
                 continue
 
-            # Success — reset error counter, ease delay back down
+            # Success - reset error counter, ease delay back down
             consecutive_errors = 0
             base_delay = _MAIN_DOMAIN_DELAY if subdomain == 'liveuamap' else LIVEUAMAP_PAGE_DELAY
             if delay > base_delay:
@@ -434,6 +434,19 @@ class LiveuamapClient:
         elapsed = time_mod.time() - _t0
         print('  Liveuamap {}: {} events ({} pages, {} after date filter) in {:.0f}s'.format(
             subdomain, len(all_venues), page, len(records), elapsed))
+
+        # STALENESS GUARD (2026-07-24): some regional feeds silently stop
+        # updating (sudan frozen at 2026-03-31 while syria/yemen stay live).
+        # Warn when the NEWEST event of the whole feed (pre-date-filter) is old,
+        # so an empty period-filtered result reads as "feed dead", not "quiet".
+        newest_ts = max((v.get('timestamp', 0) or 0 for v in all_venues), default=0)
+        if newest_ts:
+            age_days = (time_mod.time() - newest_ts) / 86400
+            if age_days > 14:
+                print('  Liveuamap {}: WARNING - feed appears STALE: newest event is '
+                      '{} ({:.0f} days old). Source-side freeze likely; do not '
+                      'interpret 0 recent events as calm.'.format(
+                          subdomain, _ts_to_iso(newest_ts)[:10], age_days))
         return records
 
     @staticmethod

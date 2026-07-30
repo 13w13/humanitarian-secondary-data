@@ -1,0 +1,2 @@
+file,source,category,records,size_bytes,period_from,period_to,directory,note
+impact_all_resources.csv,IMPACT/REACH,catalogue,45,12820,,,catalogue,"0 MSNA datasets, 45 total resources"

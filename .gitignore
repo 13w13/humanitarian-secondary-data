@@ -11,7 +11,25 @@ analysis/
 !examples/*/data/raw/*.csv
 !references/
 !references/*.csv
+# Artefacts téléchargés : rapports (PDF), pages rendues (PNG), fichiers de données.
+# 22 Mo après un seul appel à latest_figures() sur 3 pays : rien de tout ça ne se
+# versionne. Le repo publie du CODE, la donnée se re-télécharge.
+_report_cache/
+*.pdf
+*.png
+*.xlsx
+*.xls
+
 .vscode/
 .idea/
 # config.py is published (no secrets — only public endpoints and free app IDs)
 # Keep credentials in keyring or .env (which IS gitignored)
+
+# Working notes that must never reach a public remote: they describe the local
+# environment (credential inventory, network diagnostics, machine paths) rather
+# than the toolkit. Keep them local; publish conclusions in references/ instead.
+health_check*.md
+*_ACCESS.md
+*_FINDINGS.md
+NOTES_*.md
+C_tmp/

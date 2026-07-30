@@ -16,28 +16,43 @@ This repository is a practical step in that direction. Python scripts that query
 
 > **This is a work in progress.** The architecture, output format, and source coverage will evolve. Published early to signal direction and invite collaboration — not to present a finished product.
 
-## Quick start
+## Quick start — explore a country in under a minute
 
 ```bash
 git clone https://github.com/13w13/humanitarian-secondary-data.git
 cd humanitarian-secondary-data
 
-# Step 1 — Fetch data for Ukraine (IMPACT datasets + Liveuamap conflict events)
-# Liveuamap scrapes event data from HTML pages — no API, just polite persistence.
-python -X utf8 01_fetch.py UKR --only impact,liveuamap --date-from 2026-01-01
-
-# Step 2 — Browse the catalogue and pick which datasets to download
-python -X utf8 01b_download.py --select
-
-# Step 3 — Download all selected datasets
-python -X utf8 01b_download.py
+python -X utf8 scripts/explore.py LBN
 ```
 
-Step 1 creates `UKR_data/` with a `raw/` subfolder (data from APIs — conflict events, displacement, food security, etc.) and a `catalogue/` subfolder (dataset listings with download URLs). Step 2 lets you browse that catalogue and pick which datasets to actually download — arrow keys to navigate, space to toggle, enter to confirm. Downloaded files go to `UKR_data/raw/` and are marked with `x` in the catalogue CSV.
+No API key, no `pip install`, nothing written to disk. In about 7 seconds you get:
 
-Sample output is included in `examples/ukraine/data/`.
+```
+1. WHAT EXISTS          60 DTM datasets, 0 downloadable, 60 gated
+                        latest: Jul 23 2026 | Lebanon IDP Tracking Round 109 | gated
+2. FRESHNESS BY LAYER   D. publication  2026-07-23
+                        C. portal       Jul 23 2026
+                        A. producer API 2025-10-31   <- 8.8 MONTHS BEHIND
+3. THE LATEST FIGURE    « As of 22 July 2026, IOM's DTM recorded 375,090 internally
+                          displaced persons (IDPs) across Lebanon, representing a nine
+                          per cent decrease compared to 15 July. »
+                          2026-07-23 | PDF (7 pages) | reliefweb.int/node/4222775
+4. WHAT'S MISSING       the v3 API would say 64,417 (Oct 2025). It is NOT current.
+```
 
-**Requirements**: Python 3.8+. Standard library only — no pip install.
+That contrast is the whole point of this repository. **The producer's own API says 64,417. The published report says 375,090.** Both are real; one is eight months stale while still reporting the operation as "Active". A tool that queries one API and prints the number gets this wrong, silently.
+
+Try `SDN` (data is open, 8.7M IDPs cited from a 35-page PDF) or `PSE` (no DTM coverage — the tool says so in one second instead of returning an empty result that reads like "no displacement").
+
+### Then: fetch, download, analyse
+
+```bash
+python -X utf8 scripts/health_check.py SDN         # status of all 17 sources
+python -X utf8 scripts/fetch_country_data.py SDN   # pull everything to CSV
+python -X utf8 scripts/run_tests.py                # 61 assertions, no pytest needed
+```
+
+**Requirements**: Python 3.8+. Standard library only — no pip install. Some sources need a free key (ACLED, ACAPS, IDMC, DTM API); everything in the quick start above works without one.
 
 ## Parameters
 
