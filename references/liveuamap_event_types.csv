@@ -43,7 +43,7 @@ cat_id,event_type,icon,category,sample_count
 47,submarine,submarine,military_operations,2
 48,social_media,twitterico,information_media,3
 50,social_media,facebookico,information_media,1
-51,election,elect,political_social,18
+51,power_infrastructure,elect,infrastructure_economy,18
 52,biohazard,biohazard,civilian_impact,10
 53,environmental,nature,other,4
 55,civil_aviation,civil_airplane,infrastructure_economy,88

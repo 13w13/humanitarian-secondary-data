@@ -20,7 +20,8 @@ import os
 import sys
 import time
 
-sys.stdout.reconfigure(encoding='utf-8')
+if hasattr(sys.stdout, 'reconfigure'):   # absent in Jupyter, IDLE, captured output
+    sys.stdout.reconfigure(encoding='utf-8')
 sys.path.insert(0, os.path.join(os.path.dirname(os.path.abspath(__file__)), 'clients'))
 
 PASS, FAIL, SKIP = [], [], []
@@ -49,16 +50,13 @@ def is_upstream_outage(exc):
     DNS), et les exceptions de domaine que le client leve DEJA pour dire l'indispo
     (GDACSUnavailable). N'en sont PAS : un 4xx (URL fausse = notre bug), un
     ValueError/AssertionError (contrat viole), un KeyError (schema change).
+
+    La regle vit desormais dans `config.is_outage`, partagee avec le pipeline : les
+    clients levent `SourceUnavailable` au lieu de rendre [] (GDACSUnavailable en
+    herite), si bien qu'une panne n'arrive plus ici deguisee en liste vide.
     """
-    from urllib.error import HTTPError, URLError
-    import socket
-    if type(exc).__name__ in ('GDACSUnavailable', 'SourceUnavailable'):
-        return True
-    if isinstance(exc, HTTPError):
-        return exc.code >= 500
-    if isinstance(exc, (URLError, socket.timeout, TimeoutError, ConnectionError)):
-        return True
-    return False
+    from config import is_outage
+    return is_outage(exc)
 
 
 def upstream_reachable(url, timeout=15):
@@ -84,7 +82,8 @@ def t_hpc():
     from hpc_client import HPCClient
     h = HPCClient()
     plans = h.get_plans('SDN', max_funded=1)
-    check('SDN plans non vides', len(plans) > 10, '{} plans'.format(len(plans)))
+    if not check('SDN plans non vides', len(plans) > 10, '{} plans'.format(len(plans))):
+        return      # les assertions suivantes seraient vraies sur une liste vide
     # AVANT : 28/28 plans a 0 requis (lecture de p['requirements']['revisedRequirements'],
     # cle inexistante -> {} -> 0). APRES : scalaire de premier niveau.
     with_req = [p for p in plans if p['requirements_usd']]
@@ -102,14 +101,15 @@ def t_hpc():
 # ── P0 #4 : ACLED ────────────────────────────────────────────
 def t_acled():
     section(4, 'ACLED : `country=Sudan` faisait un LIKE joker (+ Soudan du Sud)')
+    from acled_client import ACLEDClient
+    from config import MissingCredential
     try:
-        from acled_client import ACLEDClient
         a = ACLEDClient()
-        if not getattr(a, 'email', None) and not os.environ.get('ACLED_EMAIL'):
-            pass
-        ev = a.get_events('Sudan', date_from='2026-07-01', date_to='2026-07-05', limit=500)
-    except Exception as e:
-        return skip('ACLED', str(e)[:70])
+    except MissingCredential:
+        return skip('ACLED', 'pas d\'identifiants ACLED')
+    # Toute autre exception remonte a main() : SKIP si panne, FAIL sinon (un
+    # KeyError finissait ici en SKIP).
+    ev = a.get_events('Sudan', date_from='2026-07-01', date_to='2026-07-05', limit=500)
     check('evenements non vides', len(ev) > 0, '{} evenements'.format(len(ev)))
     countries = sorted({e['country'] for e in ev if e['country']})
     check('UN SEUL pays renvoye', countries == ['Sudan'], str(countries))
@@ -140,7 +140,7 @@ def t_gdacs():
     alerts = g.get_alerts(iso3='PHL', limit=300)
     check('PHL a des alertes via iso3', len(alerts) > 0, '{} alertes'.format(len(alerts)))
     check('severite lue (champ severitydata, pas severity)',
-          all(a['severity_value'] not in ('', None) for a in alerts),
+          bool(alerts) and all(a['severity_value'] not in ('', None) for a in alerts),
           '{}/{} renseignees'.format(
               sum(1 for a in alerts if a['severity_value'] not in ('', None)), len(alerts)))
     check('evenements multi-pays rattaches',
@@ -152,8 +152,9 @@ def t_gdacs():
     except GDACSUnavailable:
         check('nom invalide leve au lieu de rendre 0', True, '-> GDACSUnavailable')
     except Exception as e:
-        check('nom invalide leve au lieu de rendre 0', True,
-              '-> {}'.format(type(e).__name__))
+        # Un TypeError (argument supprime) n'est pas le comportement attendu.
+        check('nom invalide leve au lieu de rendre 0', False,
+              '-> {} (attendu : GDACSUnavailable)'.format(type(e).__name__))
 
 
 # ── P0 #8 : IDMC ─────────────────────────────────────────────
@@ -172,20 +173,23 @@ def t_idmc():
     ev = c.get_idus_events('SDN')
     check('idus/all lu (gzip decompresse)', len(ev) > 100, '{} evenements'.format(len(ev)))
     check('iso3 vient de la REPONSE, tous SDN',
-          all(str(e.get('iso3', '')).upper() == 'SDN' for e in ev))
+          bool(ev) and all(str(e.get('iso3', '')).upper() == 'SDN' for e in ev))
 
 
 # ── P0 #9 : ACAPS ────────────────────────────────────────────
 def t_acaps():
     section(9, 'ACAPS : `people_in_need` etait un SCORE 0-10 lu comme un effectif')
     from acaps_client import ACAPSClient
+    from config import MissingCredential
     a = ACAPSClient()
     try:
         rows = a.get_inform_severity('SDN')
-    except Exception as e:
-        return skip('ACAPS', str(e)[:70])
-    if not rows:
-        return skip('ACAPS', 'aucune ligne (cle absente ?)')
+    except MissingCredential:
+        return skip('ACAPS', 'pas de cle ACAPS')
+    # Toute autre exception remonte a main() : SKIP si panne, FAIL sinon. Avant, un
+    # KeyError (schema change) finissait lui aussi en SKIP.
+    if not check('ACAPS SDN non vide', bool(rows), '{} lignes'.format(len(rows))):
+        return
     r = rows[0]
     check('colonne renommee pin_score_0_10', 'pin_score_0_10' in r)
     check('ancien nom trompeur retire', 'people_in_need' not in r)
@@ -234,7 +238,8 @@ def t_ifrc():
     from ifrcgo_client import IFRCGoClient
     c = IFRCGoClient()
     ap = c.get_appeals(iso3='SDN', limit=8)
-    check('appels SDN non vides', len(ap) > 0, '{} appels'.format(len(ap)))
+    if not check('appels SDN non vides', len(ap) > 0, '{} appels'.format(len(ap))):
+        return      # les trois `all()` suivants seraient vrais sur 0 appel
     check('tous les appels concernent le Soudan',
           all('sudan' in str(a.get('name', '')).lower() or
               str((a.get('country') or {}).get('iso3', '')).upper() == 'SDN' for a in ap),

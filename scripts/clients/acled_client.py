@@ -18,21 +18,46 @@ Usage:
     acled.save_csv(events, 'data/LBN/acled_events.csv')
 """
 import sys
-sys.stdout.reconfigure(encoding='utf-8')
+if hasattr(sys.stdout, 'reconfigure'):   # absent in Jupyter, IDLE, captured output
+    sys.stdout.reconfigure(encoding='utf-8')
 
 import json
-import os
 import time
 from urllib.request import Request, urlopen
 from urllib.parse import urlencode
 
 from config import (DEFAULT_TIMEOUT, RATE_LIMIT_DELAY, USER_AGENT, save_csv,
-                    get_credential)
+                    get_credential, MissingCredential, NotCovered)
 
 ACLED_TOKEN_URL = 'https://acleddata.com/oauth/token'
 ACLED_DATA_URL = 'https://acleddata.com/api/acled/read'
 ACLED_CAST_URL = 'https://acleddata.com/api/cast/read'
 ACLED_DELETED_URL = 'https://acleddata.com/api/deleted/read'
+
+# ACLED filters on a country NAME (strict with country_where='='), not an ISO3.
+# The pipeline used to build it as COUNTRY_NAMES.get(iso3, iso3).title(): "Congo"
+# for COD (ACLED's DRC is "Democratic Republic of Congo") and "Caf" for any code
+# outside its table, both answered with 0 events. Canonical ACLED names only.
+ACLED_COUNTRY_NAMES = {
+    'AFG': 'Afghanistan', 'BDI': 'Burundi', 'COD': 'Democratic Republic of Congo',
+    'ETH': 'Ethiopia', 'HTI': 'Haiti', 'IRN': 'Iran', 'IRQ': 'Iraq',
+    'KEN': 'Kenya', 'LBN': 'Lebanon', 'LBY': 'Libya', 'MLI': 'Mali',
+    'MMR': 'Myanmar', 'MOZ': 'Mozambique', 'NER': 'Niger', 'NGA': 'Nigeria',
+    'PAK': 'Pakistan', 'PSE': 'Palestine', 'SDN': 'Sudan', 'SOM': 'Somalia',
+    'SSD': 'South Sudan', 'SYR': 'Syria', 'TCD': 'Chad', 'UKR': 'Ukraine',
+    'YEM': 'Yemen',
+}
+
+
+def acled_country_name(iso3):
+    """ACLED country name for an ISO3, or NotCovered: never a guessed name."""
+    name = ACLED_COUNTRY_NAMES.get(str(iso3).upper())
+    if not name:
+        raise NotCovered(
+            'No ACLED country name mapped for {}: add its canonical ACLED name to '
+            'ACLED_COUNTRY_NAMES rather than querying a guess (a wrong name '
+            'returns 0 events, not an error).'.format(iso3))
+    return name
 
 
 class ACLEDClient:
@@ -50,7 +75,7 @@ class ACLEDClient:
         self.password = password or get_credential(
             'sds.acled', 'password', 'ACLED_PASSWORD')
         if not self.email or not self.password:
-            raise ValueError(
+            raise MissingCredential(
                 'ACLED requires email + password. Set via:\n'
                 '  keyring.set_password("sds.acled", "email", "...")\n'
                 '  keyring.set_password("sds.acled", "password", "...")\n'
@@ -210,8 +235,10 @@ class ACLEDClient:
                 'ACLED a renvoye {} pays pour la requete {!r} : {}. Le filtre '
                 'country_where= n\'a pas porte.'.format(len(seen), country, seen[:5]))
         if all_events and seen and seen[0].strip().lower() != str(country).strip().lower():
-            print('  ACLED: demande {!r}, recu {!r} (nom canonique different ?)'
-                  .format(country, seen[0]))
+            # One country, but not the one asked for: another country's events
+            # must not be filed under this one (was a printed warning only).
+            raise ValueError('ACLED: demande {!r}, recu {!r} : ce n\'est pas le pays '
+                             'demande.'.format(country, seen[0]))
         return all_events
 
     def get_event_summary(self, country, date_from=None, date_to=None):
@@ -243,11 +270,17 @@ class ACLEDClient:
         total_forecast, battles_forecast, erv_forecast, vac_forecast,
         total_observed, battles_observed, erv_observed, vac_observed.
         """
-        params = {'country': country}
+        # Same wildcard trap as the events endpoint: without country_where='=',
+        # "Sudan" also matches South Sudan and "Niger" Nigeria.
+        params = {'country': country, 'country_where': '='}
         if year:
             params['year'] = str(year)
 
         data = self._get(params, base_url=ACLED_CAST_URL)
+        seen = sorted({str(r.get('country', '')) for r in data if r.get('country')})
+        if seen and [c.lower() for c in seen] != [str(country).lower()]:
+            raise ValueError('ACLED CAST a renvoye {} pour la requete {!r} : le filtre '
+                             'pays n\'a pas porte.'.format(seen[:5], country))
         forecasts = []
         for row in data:
             forecasts.append({

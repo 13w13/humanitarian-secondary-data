@@ -12,21 +12,25 @@ Usage:
     disability = rw.search_disability('LBN')
 """
 import sys
-sys.stdout.reconfigure(encoding='utf-8')
+if hasattr(sys.stdout, 'reconfigure'):   # absent in Jupyter, IDLE, captured output
+    sys.stdout.reconfigure(encoding='utf-8')
 
 import json
-import csv
-import os
 import time
+from urllib.error import HTTPError
+from urllib.parse import urlencode
 from urllib.request import Request, urlopen
 
 from config import (
-    RELIEFWEB_BASE, RELIEFWEB_APPNAME,
+    RELIEFWEB_BASE, RELIEFWEB_APPNAME, RELIEFWEB_APPNAME_HELP, MissingCredential,
     DEFAULT_TIMEOUT, RATE_LIMIT_DELAY, USER_AGENT, get_credential)
 
 
+MAX_PAGES = 40      # per listing: 40 x limit rows at most
+
+
 class ReliefWebClient:
-    """Client for ReliefWeb API v1 (POST queries)."""
+    """Client for ReliefWeb API v2 (POST queries)."""
 
     def __init__(self, appname=None):
         self.base = RELIEFWEB_BASE
@@ -40,22 +44,32 @@ class ReliefWebClient:
 
     def _post(self, endpoint, payload):
         """POST query to ReliefWeb API."""
-        url = '{}/{}?appname={}'.format(self.base, endpoint, self.appname)
+        # urlencode: an appname with "&" or a space injected a parameter or broke
+        # the URL.
+        url = '{}/{}?{}'.format(self.base, endpoint, urlencode({'appname': self.appname}))
         data = json.dumps(payload).encode('utf-8')
         req = Request(url, data=data, headers={
             'Content-Type': 'application/json',
             'User-Agent': USER_AGENT,
         })
-        resp = json.loads(urlopen(req, timeout=DEFAULT_TIMEOUT).read())
-        return resp
+        try:
+            return json.loads(urlopen(req, timeout=DEFAULT_TIMEOUT).read())
+        except HTTPError as e:
+            if e.code == 403:   # an unapproved appname: a missing credential
+                raise MissingCredential(RELIEFWEB_APPNAME_HELP) from e
+            raise
 
     def _date_filter(self, iso3, date_from=None, date_to=None):
         """Build standard country + date filter."""
         conditions = [{'field': 'primary_country.iso3', 'value': iso3}]
+        # Each bound on its own: date_to used to be dropped unless date_from was
+        # also given, and the whole history came back instead.
+        date_val = {}
         if date_from:
-            date_val = {'from': '{}T00:00:00+00:00'.format(date_from)}
-            if date_to:
-                date_val['to'] = '{}T23:59:59+00:00'.format(date_to)
+            date_val['from'] = '{}T00:00:00+00:00'.format(date_from)
+        if date_to:
+            date_val['to'] = '{}T23:59:59+00:00'.format(date_to)
+        if date_val:
             conditions.append({'field': 'date.created', 'value': date_val})
         if len(conditions) == 1:
             return conditions[0]
@@ -124,9 +138,12 @@ class ReliefWebClient:
                     'date': f.get('date', {}).get('created', '')[:10],
                     'url': f.get('url', ''),
                 })
-            if len(data) < limit:
-                break
             offset += limit
+            # Stop on the announced total, and after MAX_PAGES whatever happens: an
+            # ignored offset used to loop forever on ReliefWeb's daily quota.
+            if len(data) < limit or offset >= resp.get('totalCount', 0) \
+                    or offset >= limit * MAX_PAGES:
+                break
             time.sleep(RATE_LIMIT_DELAY)
         return reports
 
@@ -206,9 +223,12 @@ class ReliefWebClient:
                     'date': f.get('date', {}).get('created', '')[:10],
                     'url': f.get('url', ''),
                 })
-            if len(data) < limit:
-                break
             offset += limit
+            # Stop on the announced total, and after MAX_PAGES whatever happens: an
+            # ignored offset used to loop forever on ReliefWeb's daily quota.
+            if len(data) < limit or offset >= resp.get('totalCount', 0) \
+                    or offset >= limit * MAX_PAGES:
+                break
             time.sleep(RATE_LIMIT_DELAY)
         return reports
 

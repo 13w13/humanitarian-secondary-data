@@ -12,7 +12,8 @@ Usage:
     demographics = unhcr.get_demographics('LBN', year=2024)
 """
 import sys
-sys.stdout.reconfigure(encoding='utf-8')
+if hasattr(sys.stdout, 'reconfigure'):   # absent in Jupyter, IDLE, captured output
+    sys.stdout.reconfigure(encoding='utf-8')
 
 import json
 import time
@@ -91,7 +92,8 @@ class UNHCRClient:
             return
         want = iso3.upper()
         seen = {str(r.get(key, '')).upper() for r in records}
-        if want not in seen:
+        # Every row, not just one: an LBN+SYR+TUR answer used to pass for LBN.
+        if want not in seen or (seen - {want, ''}):
             raise WrongScopeError(
                 'UNHCR {}: asked for {}={} but the response contains only {} '
                 '-> the filter was IGNORED (global aggregates). Refusing to '
@@ -112,8 +114,15 @@ class UNHCRClient:
             resp = self._get(endpoint, params)
             items = resp.get('items', [])
             all_items.extend(items)
-            max_pages = resp.get('maxPages') or 1
-            if page >= max_pages or not items:
+            max_pages = resp.get('maxPages')
+            if not items or page >= 200:
+                break
+            if max_pages is None:
+                # No page count: only a short page proves the end (it used to stop
+                # after page 1 and keep 1,000 of 1,005 rows).
+                if len(items) < params['limit']:
+                    break
+            elif page >= max_pages:
                 break
             page += 1
             time.sleep(RATE_LIMIT_DELAY)
@@ -145,11 +154,10 @@ class UNHCRClient:
         # returned 1964..2025 unfiltered, while yearFrom+yearTo returned exactly
         # the requested range). The range only applies when BOTH bounds are sent,
         # so default the upper bound rather than shipping an unfiltered series.
-        if year_from:
-            params['yearFrom'] = int(year_from)
+        if year_from or year_to:
+            # Both bounds or none: a lone bound is ignored by the API (see above).
+            params['yearFrom'] = int(year_from) if year_from else 1951
             params['yearTo'] = int(year_to) if year_to else datetime.now().year
-        elif year_to:
-            params['yearTo'] = int(year_to)
         if population_group:
             # Not a documented filter: keep the argument for API compatibility
             # but do not send an unknown param (it would be silently ignored).
@@ -236,10 +244,11 @@ class UNHCRClient:
             params['coa'] = country_asylum.upper()
         if country_origin:
             params['coo'] = country_origin.upper()
-        if year_from:
-            params['yearFrom'] = int(year_from)
-        if year_to:
-            params['yearTo'] = int(year_to)
+        if year_from or year_to:
+            # Same rule as get_population: a lone yearFrom is ignored and the whole
+            # series back to the 1960s came back as "since 2018".
+            params['yearFrom'] = int(year_from) if year_from else 1951
+            params['yearTo'] = int(year_to) if year_to else datetime.now().year
 
         items = self._paginate('solutions/', params)
 

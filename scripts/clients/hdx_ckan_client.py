@@ -10,19 +10,26 @@ with direct XLSX/CSV download URLs and CC BY-IGO license.
 Usage:
     from hdx_ckan_client import HDXClient
     hdx = HDXClient()
-    results = hdx.search_datasets('msna lebanon', format='XLSX')
+    results = hdx.search_datasets('msna lebanon', format_filter='XLSX')
     hdx.download_resource(results[0]['resources'][0], 'data/LBN/')
 """
 import sys
-sys.stdout.reconfigure(encoding='utf-8')
+if hasattr(sys.stdout, 'reconfigure'):   # absent in Jupyter, IDLE, captured output
+    sys.stdout.reconfigure(encoding='utf-8')
 
 import json
 import os
 import time
+from urllib.parse import urlencode
 from urllib.request import Request, urlopen
 
 from config import (HDX_CKAN_BASE, DEFAULT_TIMEOUT, RATE_LIMIT_DELAY, USER_AGENT,
-                    get_credential)
+                    get_credential, download_stream, safe_filename)
+
+
+def _day(v):
+    """First 10 characters of a date field, '' for null (never the text 'None')."""
+    return str(v or '')[:10]
 
 
 class HDXClient:
@@ -36,7 +43,10 @@ class HDXClient:
             self.api_key = get_credential('sds.hdx', 'api_key', 'HDX_API_KEY')
 
     def _get(self, action, params=''):
-        """GET request to CKAN API."""
+        """GET request to CKAN API. `params` is a dict (url-encoded here) or a
+        ready query string."""
+        if isinstance(params, dict):
+            params = urlencode(params)
         url = '{}/{}?{}'.format(self.base, action, params)
         headers = {'User-Agent': USER_AGENT}
         if self.api_key:
@@ -59,10 +69,11 @@ class HDXClient:
 
         Returns list of dicts with: name, title, org, date, num_resources, resources.
         """
-        fq = 'res_format:{}'.format(format_filter) if format_filter else ''
-        params = 'q={}&rows={}'.format(query.replace(' ', '+'), rows)
-        if fq:
-            params += '&fq={}'.format(fq)
+        # urlencode: "water & sanitation" or "côte d'ivoire" were sent raw, which
+        # truncated the query at "&" or raised on non-ASCII.
+        params = {'q': query, 'rows': rows}
+        if format_filter:
+            params['fq'] = 'res_format:{}'.format(format_filter)
 
         result = self._get('package_search', params)
         datasets = []
@@ -75,7 +86,7 @@ class HDXClient:
                     'format': res.get('format', ''),
                     'url': res.get('url', ''),
                     'size': res.get('size', 0),
-                    'last_modified': str(res.get('last_modified', ''))[:10],
+                    'last_modified': _day(res.get('last_modified')),
                 })
             org = pkg.get('organization', {})
             datasets.append({
@@ -85,7 +96,7 @@ class HDXClient:
                 # `metadata_modified` = derniere MAJ des metadonnees HDX, PAS la periode
                 # couverte par la donnee. Un dataset de 2021 remis a jour hier
                 # affiche 2026. Le nom de colonne le dit maintenant.
-                'metadata_modified': str(pkg.get('metadata_modified', ''))[:10],
+                'metadata_modified': _day(pkg.get('metadata_modified')),
                 'data_period_start': str(pkg.get('dataset_date', '') or '')[:40],
                 'license': pkg.get('license_title', ''),
                 'num_resources': len(resources),
@@ -105,29 +116,61 @@ class HDXClient:
             rows=rows,
         )
 
-    def list_all_datasets(self, iso3, theme_filter=None, rows=500):
+    def list_all_datasets(self, iso3, theme_filter=None, rows=500, max_datasets=5000):
         """List ALL datasets for a country using CKAN group filter.
 
         Unlike search_datasets() which searches by text query (and misses most),
         this uses fq=groups:{iso3_lower} which returns ALL datasets tagged for
         that country. HDX uses ISO3 lowercase as group names.
 
+        Pages with `start=` until the `count` HDX announces is reached (it used to
+        stop at the first 500 rows and report them as the country's total, so a
+        disability dataset at position 900 read as "0 disability-related").
+        `self.last_count` keeps the announced total, and a listing cut short by
+        `max_datasets` says so.
+
         Args:
             iso3: ISO3 country code (e.g., 'PSE', 'LBN', 'SDN')
             theme_filter: Optional list of keywords to filter by title/notes
                           (e.g., ['disability', 'needs', 'assessment', 'msna'])
-            rows: Max datasets to retrieve (default 500, HDX max ~1000)
+            rows: page size (HDX caps it at 1000)
+            max_datasets: safety cap on the whole walk
 
         Returns list of dataset dicts (same format as search_datasets).
         """
         iso3_lower = iso3.lower()
-        params = 'fq=groups:{}&rows={}&sort=metadata_modified+desc'.format(iso3_lower, rows)
+        pkgs, start, total_count = [], 0, None
+        while True:
+            result = self._get('package_search', {
+                'fq': 'groups:{}'.format(iso3_lower), 'rows': rows, 'start': start,
+                'sort': 'metadata_modified desc'})
+            if total_count is None:
+                total_count = result.get('count', 0) or 0
+            batch = result.get('results', []) or []
+            pkgs.extend(batch)
+            start += len(batch)
+            if not batch or start >= total_count or start >= max_datasets:
+                break
+            time.sleep(RATE_LIMIT_DELAY)
+        self.last_count = total_count
+        self.last_truncated = len(pkgs) < total_count
+        if self.last_truncated:
+            print('  HDX CKAN: only {} of {} datasets listed for {} (max_datasets={}): '
+                  'a partial listing, not the total'.format(
+                      len(pkgs), total_count, iso3_lower, max_datasets))
 
-        result = self._get('package_search', params)
-        total_count = result.get('count', 0)
+        # Post-condition: the group facet is the country scope. A row outside it
+        # would be another country's dataset listed under this one.
+        stray = [p.get('name') for p in pkgs
+                 if iso3_lower not in [str(g.get('name', '')).lower()
+                                       for g in (p.get('groups') or [])]]
+        if stray:
+            raise ValueError('HDX CKAN: {} dataset(s) outside group {} returned '
+                             '(e.g. {}): the country filter did not apply'.format(
+                                 len(stray), iso3_lower, stray[:2]))
+
         datasets = []
-
-        for pkg in result.get('results', []):
+        for pkg in pkgs:
             # Optional theme filter (case-insensitive on title + notes)
             if theme_filter:
                 text = '{} {}'.format(
@@ -143,7 +186,7 @@ class HDXClient:
                     'format': res.get('format', ''),
                     'url': res.get('url', ''),
                     'size': res.get('size', 0),
-                    'last_modified': str(res.get('last_modified', ''))[:10],
+                    'last_modified': _day(res.get('last_modified')),
                 })
             org = pkg.get('organization', {})
             datasets.append({
@@ -153,15 +196,17 @@ class HDXClient:
                 # `metadata_modified` = derniere MAJ des metadonnees HDX, PAS la periode
                 # couverte par la donnee. Un dataset de 2021 remis a jour hier
                 # affiche 2026. Le nom de colonne le dit maintenant.
-                'metadata_modified': str(pkg.get('metadata_modified', ''))[:10],
+                'metadata_modified': _day(pkg.get('metadata_modified')),
                 'data_period_start': str(pkg.get('dataset_date', '') or '')[:40],
                 'license': pkg.get('license_title', ''),
                 'num_resources': len(resources),
                 'resources': resources,
                 'url': 'https://data.humdata.org/dataset/{}'.format(pkg.get('name', '')),
+                # kept so a caller can apply more theme filters without re-querying
+                'notes': str(pkg.get('notes', '') or '')[:2000],
             })
 
-        print('  HDX CKAN: {} total datasets for {} (returned {}{})'.format(
+        print('  HDX CKAN: {} total datasets for {} (listed {}{})'.format(
             total_count, iso3_lower, len(datasets),
             ', filtered by {}'.format(theme_filter) if theme_filter else ''))
         return datasets
@@ -179,7 +224,7 @@ class HDXClient:
                 'format': res.get('format', ''),
                 'url': res.get('url', ''),
                 'size': res.get('size', 0),
-                'last_modified': str(res.get('last_modified', ''))[:10],
+                'last_modified': _day(res.get('last_modified')),
             })
         org = result.get('organization', {})
         return {
@@ -188,7 +233,7 @@ class HDXClient:
             'org': org.get('title', '') if org else '',
             'notes': result.get('notes', ''),
             'license': result.get('license_title', ''),
-            'metadata_modified': str(result.get('metadata_modified', ''))[:10],
+            'metadata_modified': _day(result.get('metadata_modified')),
             'data_period_start': str(result.get('dataset_date', '') or '')[:40],
             'resources': resources,
         }
@@ -203,6 +248,11 @@ class HDXClient:
             output_dir: Directory to save file
             filename: Override filename (default: use resource name or URL basename)
 
+        The name and URL come from publisher metadata, so they are untrusted: the
+        name is reduced to one path component (it used to accept "../../x" and
+        write outside output_dir), and the download goes through
+        config.download_stream (http/https only, size cap, atomic .part write).
+
         Returns path to downloaded file.
         """
         url = resource.get('url', '')
@@ -215,20 +265,15 @@ class HDXClient:
             fmt = resource.get('format', '').lower()
             if fmt and not filename.lower().endswith('.{}'.format(fmt)):
                 filename = '{}.{}'.format(filename, fmt)
+        filename = safe_filename(filename)
 
         os.makedirs(output_dir, exist_ok=True)
         filepath = os.path.join(output_dir, filename)
+        root = os.path.realpath(output_dir)
+        if os.path.dirname(os.path.realpath(filepath)) != root:
+            raise ValueError('refusing to write outside {}: {!r}'.format(output_dir, filename))
 
-        req = Request(url, headers={'User-Agent': USER_AGENT})
-        with urlopen(req, timeout=60) as resp:
-            with open(filepath, 'wb') as f:
-                while True:
-                    chunk = resp.read(8192)
-                    if not chunk:
-                        break
-                    f.write(chunk)
-
-        size = os.path.getsize(filepath)
+        size = download_stream(url, filepath, timeout=60)
         print('  Downloaded: {} ({:,} bytes)'.format(filename, size))
         return filepath
 
@@ -246,7 +291,9 @@ class HDXClient:
                     'dataset_name': ds['name'],
                     'dataset_title': ds['title'],
                     'org': ds['org'],
-                    'dataset_date': ds.get('metadata_modified', ''),
+                    # HDX's own `dataset_date` is the period the data covers;
+                    # this is the last metadata edit, so it carries that name.
+                    'metadata_modified': ds.get('metadata_modified', ''),
                     'license': ds.get('license', ''),
                     'resource_name': res['name'],
                     'resource_format': res['format'],

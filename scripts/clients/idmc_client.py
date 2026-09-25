@@ -18,14 +18,15 @@ Usage:
     events = idmc.get_displacement_events('SDN', year_from=2023)
 """
 import sys
-sys.stdout.reconfigure(encoding='utf-8')
+if hasattr(sys.stdout, 'reconfigure'):   # absent in Jupyter, IDLE, captured output
+    sys.stdout.reconfigure(encoding='utf-8')
 
-import os
 import json
 from urllib.request import Request, urlopen
 from urllib.parse import urlencode
 
-from config import DEFAULT_TIMEOUT, USER_AGENT, save_csv, get_credential
+from config import (DEFAULT_TIMEOUT, USER_AGENT, save_csv, get_credential,
+                    MissingCredential, raise_unavailable)
 
 IDMC_REST_BASE = 'https://helix-tools-api.idmcdb.org/external-api'
 
@@ -33,8 +34,9 @@ IDMC_REST_BASE = 'https://helix-tools-api.idmcdb.org/external-api'
 class IDMCClient:
     """Client for IDMC REST API (Helix Tools).
 
-    Requires IDMC_CLIENT_ID env var. If not set, methods return empty
-    results with a warning (graceful degradation).
+    Requires a client_id (keyring sds.idmc/client_id or env var IDMC_CLIENT_ID).
+    Without one, every query raises MissingCredential. It used to return empty
+    results instead, which the pipeline then reported as "Stock 0 IDPs".
     """
 
     def __init__(self, client_id=None):
@@ -42,10 +44,12 @@ class IDMCClient:
         # OS keychain first, then env var. No hard keyring dependency.
         self.client_id = client_id or get_credential(
             'sds.idmc', 'client_id', 'IDMC_CLIENT_ID')
+
+    def _require_key(self):
         if not self.client_id:
-            print('  IDMC: No credentials — IDMC queries will be skipped.')
-            print('  Set via: keyring sds.idmc/client_id or env var IDMC_CLIENT_ID')
-            print('  Register free at: email ch.datainfo@idmc.ch')
+            raise MissingCredential(
+                'IDMC requires a free client_id: keyring sds.idmc/client_id or env '
+                'var IDMC_CLIENT_ID (request it from ch.datainfo@idmc.ch).')
 
     def _get(self, endpoint, params=None, timeout=None):
         """GET sur l'API REST IDMC, avec `client_id` et decompression gzip.
@@ -55,8 +59,7 @@ class IDMCClient:
         explicite, `json.loads` echoue sur des octets binaires et l'appel se termine
         en `except -> []`, ce qui se lit comme "pas de donnee".
         """
-        if not self.client_id:
-            return {}
+        self._require_key()
         if params is None:
             params = {}
         params['client_id'] = self.client_id
@@ -83,21 +86,20 @@ class IDMCClient:
 
         Verifie 2026-07-25 : 1 066 lignes SDN dans le flux mondial.
         """
-        if not self.client_id:
-            return []
         try:
             data = self._get('idus/all/', timeout=timeout)
         except Exception as e:
-            print('  IDMC idus/all: {}'.format(str(e)[:110]))
-            return []
+            raise_unavailable('IDMC idus/all', e)
         rows = data if isinstance(data, list) else (data.get('results') or [])
         want = iso3.upper()
+        # Post-condition: the filter below needs the `iso3` field. If the feed
+        # renamed it, every country would silently get 0 events out of 62k rows.
+        # (The former check looked for foreign rows AFTER filtering: it could
+        # never fire.)
+        if rows and not any('iso3' in r for r in rows[:200]):
+            raise ValueError('IDMC idus/all: no `iso3` field in the feed rows (keys: '
+                             '{}): the schema changed'.format(sorted(rows[0])[:8]))
         out = [r for r in rows if str(r.get('iso3', '')).upper() == want]
-        # Post-condition : le flux est mondial, l'assertion porte donc sur le filtre.
-        wrong = sorted({str(r.get('iso3')) for r in out
-                        if str(r.get('iso3', '')).upper() != want})
-        if wrong:
-            raise ValueError('IDMC: filtrage iso3 casse, pays parasites {}'.format(wrong[:4]))
         print('  IDMC idus: {} evenements {} sur {} lignes mondiales'.format(
             len(out), want, len(rows)))
         return out
@@ -115,9 +117,6 @@ class IDMCClient:
             List of dicts: year, conflict_new_displacements, disaster_new_displacements,
             conflict_stock, disaster_stock.
         """
-        if not self.client_id:
-            return []
-
         params = {'iso3__in': iso3.upper()}
         if year_from:
             params['start_year'] = str(int(year_from))
@@ -129,8 +128,7 @@ class IDMCClient:
         try:
             data = self._get('gidd/displacements/', params)
         except Exception as e:
-            print('  IDMC displacements: {}'.format(e))
-            return []
+            raise_unavailable('IDMC displacements', e)
 
         results = data.get('results', []) if isinstance(data, dict) else data if isinstance(data, list) else []
 
@@ -160,54 +158,48 @@ class IDMCClient:
         return sorted(by_year.values(), key=lambda r: r['year'])
 
     def get_displacement_events(self, iso3, year_from=None, year_to=None, cause=None):
-        """Get individual displacement events (IDU — near-real-time).
+        """Displacement events (IDU, near-real-time) for a country.
 
-        Args:
-            iso3: Country ISO3 code
-            year_from: Start year
-            year_to: End year
-            cause: CONFLICT or DISASTER
+        Built on get_idus_events: the documented `idus/all/` feed, filtered on the
+        iso3 each row carries. This method used to call `idu/all/` with country and
+        year parameters that the feed does not take: either a 404 read as "0 events
+        since 2018", or the global feed filed under the requested country.
+
+        Field names follow the IDU feed, with fallbacks. A column that comes back
+        empty everywhere is flagged by the CSV audit rather than guessed.
 
         Returns:
             List of event dicts: event_name, year, displacement_type,
             new_displacements, cause, start_date, end_date.
         """
-        if not self.client_id:
-            return []
-
-        params = {'iso3__in': iso3.upper()}
-        if year_from:
-            params['start_year'] = str(int(year_from))
-        if year_to:
-            params['end_year'] = str(int(year_to))
-        if cause:
-            params['cause'] = cause.upper()
-
-        try:
-            data = self._get('idu/all/', params)
-        except Exception as e:
-            print('  IDMC events: {}'.format(e))
-            return []
-
-        results = data.get('results', []) if isinstance(data, dict) else data if isinstance(data, list) else []
-
         records = []
-        for e in results:
+        for e in self.get_idus_events(iso3):
+            year = e.get('year')
+            try:
+                y = int(year)
+            except (TypeError, ValueError):
+                y = None
+            if y is not None and ((year_from and y < int(year_from))
+                                  or (year_to and y > int(year_to))):
+                continue
+            kind = e.get('displacement_type') or e.get('category') or e.get('cause') or ''
+            if cause and cause.upper() not in str(kind).upper():
+                continue
+            figure = e.get('figure')
             records.append({
-                # Lu de la REPONSE quand il y est ; l'argument n'est qu'un repli.
-                # Fabriquer l'iso3 depuis l'entree etiquette au pays demande
-                # n'importe quelle ligne qui aurait echappe au filtre.
-                'iso3': str(e.get('iso3') or iso3).upper(),
-                'event_id': e.get('id', ''),
-                'event_name': e.get('event_name', '') or e.get('name', ''),
-                'year': e.get('year', ''),
+                'iso3': str(e.get('iso3')).upper(),
+                'event_id': e.get('event_id') or e.get('id', ''),
+                'event_name': e.get('event_name') or e.get('name', ''),
+                'year': year,
                 'displacement_type': e.get('displacement_type', ''),
-                'new_displacements': e.get('figure', 0) or e.get('new_displacements', 0) or 0,
-                'cause': e.get('cause', ''),
-                'start_date': e.get('start_date', '') or e.get('date', ''),
-                'end_date': e.get('end_date', ''),
+                'new_displacements': figure if figure is not None
+                else e.get('new_displacements'),
+                'cause': e.get('category') or e.get('cause') or '',
+                'start_date': (e.get('displacement_start_date') or e.get('event_start_date')
+                               or e.get('displacement_date') or e.get('start_date') or ''),
+                'end_date': (e.get('displacement_end_date') or e.get('event_end_date')
+                             or e.get('end_date') or ''),
             })
-
         return records
 
     def get_disasters(self, iso3, year_from=None, year_to=None):
@@ -215,9 +207,6 @@ class IDMCClient:
 
         Returns list of disaster event records.
         """
-        if not self.client_id:
-            return []
-
         params = {'iso3__in': iso3.upper()}
         if year_from:
             params['start_year'] = str(int(year_from))
@@ -227,8 +216,7 @@ class IDMCClient:
         try:
             data = self._get('gidd/disasters/', params)
         except Exception as e:
-            print('  IDMC disasters: {}'.format(e))
-            return []
+            raise_unavailable('IDMC disasters', e)
 
         results = data.get('results', []) if isinstance(data, dict) else data if isinstance(data, list) else []
 
@@ -261,9 +249,6 @@ class IDMCClient:
 
         latest = data[-1]  # Most recent year
         return {
-            # Lu de la REPONSE quand il y est ; l'argument n'est qu'un repli.
-                # Fabriquer l'iso3 depuis l'entree etiquette au pays demande
-                # n'importe quelle ligne qui aurait echappe au filtre.
             'iso3': iso3.upper(),   # agregat construit localement, pas une ligne d'API
             'name': '',  # REST API doesn't return country name in displacement endpoint
             'latest_year': latest['year'],

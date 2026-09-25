@@ -23,15 +23,17 @@ import os
 import sys
 import time
 
-sys.stdout.reconfigure(encoding='utf-8')
+if hasattr(sys.stdout, 'reconfigure'):   # absent in Jupyter, IDLE, captured output
+    sys.stdout.reconfigure(encoding='utf-8')
 sys.path.insert(0, os.path.join(os.path.dirname(os.path.abspath(__file__)), 'clients'))
 
 from dtm_client import DTMClient, UnmappedCountry, DatasetGated       # noqa: E402
 from dtm_files import describe, read_sheet, sum_by, checksum          # noqa: E402
 from report_figures import latest_figures                             # noqa: E402
+from config import is_outage                                          # noqa: E402
 
 CACHE = os.path.join(os.path.dirname(os.path.abspath(__file__)), '..', '_report_cache')
-PASS, FAIL = [], []
+PASS, FAIL, SKIP = [], [], []
 
 
 def check(label, cond, detail=''):
@@ -40,13 +42,34 @@ def check(label, cond, detail=''):
     return cond
 
 
-def main():
-    t0 = time.time()
-    d = DTMClient()
+def skip(label, why):
+    SKIP.append(label)
+    print('  [SKIP] {} ({})'.format(label, why))
 
+
+def section(title, fn, d):
+    """Run one section. An outage or a missing optional package is a SKIP.
+
+    Anything else that escapes is a FAIL with its type: the suite used to stop on
+    an IndexError when the catalogue came back empty during an outage.
+    """
+    print()
     print('=' * 76)
-    print('1. Le catalogue refuse ce qu\'il ne couvre pas')
+    print(title)
     print('=' * 76)
+    try:
+        fn(d)
+    except Exception as e:  # noqa: BLE001 - classified below, never swallowed
+        why = '{}: {}'.format(type(e).__name__, str(e)[:100])
+        if is_outage(e):
+            skip(title, 'panne amont : ' + why)
+        elif isinstance(e, ImportError):
+            skip(title, 'dependance optionnelle absente : ' + why)
+        else:
+            check(title + ' a leve', False, why)
+
+
+def s1_refus(d):
     for bad in ('PSE', 'MMR'):
         try:
             d.browse_catalogue(bad, max_pages=1)
@@ -54,12 +77,16 @@ def main():
         except UnmappedCountry:
             check('refus ' + bad, True, '-> UnmappedCountry')
 
-    print()
-    print('=' * 76)
-    print('2. Scope pays réel, et statut d\'accès par pays')
-    print('=' * 76)
+
+def s2_scope(d):
     lbn = d.browse_catalogue('LBN', max_pages=1)
     sdn = d.browse_catalogue('SDN', max_pages=1)
+    # Non vide d'abord : `all()` sur une liste vide est vrai, et ces trois lignes
+    # passaient au vert sur 0 ligne pendant une panne.
+    check('LBN catalogue non vide', bool(lbn), '{} lignes'.format(len(lbn)))
+    check('SDN catalogue non vide', bool(sdn), '{} lignes'.format(len(sdn)))
+    if not (lbn and sdn):
+        return
     check('LBN scope', {r['country_slug'] for r in lbn if r['country_slug']} <= {'lebanon'},
           '{} lignes'.format(len(lbn)))
     check('LBN tout verrouillé', all(r['access'] == 'gated' for r in lbn),
@@ -73,14 +100,12 @@ def main():
     except DatasetGated:
         check('refus de télécharger un verrouillé', True, '-> DatasetGated')
 
-    print()
-    print('=' * 76)
-    print('3. Lecture d\'un fichier + SOMME DE CONTRÔLE (ancre stable)')
-    print('=' * 76)
+
+def s3_checksum(d):
     rows = d.browse_catalogue('AFG', max_pages=1, open_only=True)
     fm = [r for r in rows if 'flow monitoring' in r['title'].lower()]
     if not check('dataset Flow Monitoring AFG trouvé', bool(fm)):
-        return finish(t0)
+        return
     path = d.download_dataset(fm[0], os.path.join(CACHE, 'afg'))
     info = describe(path)
     chosen = [s for s in info['sheets'] if s['is_chosen']][0]
@@ -107,12 +132,15 @@ def main():
     except ValueError:
         check('refus de sommer un pourcentage', True, '-> ValueError')
 
-    print()
-    print('=' * 76)
-    print('4. Résolveur : portée des phrases citables')
-    print('=' * 76)
+
+def s4_resolveur(d):
     for iso, expect_gated in (('LBN', True), ('SDN', False)):
         dos = latest_figures(iso, topic='dtm', cache_dir=CACHE)
+        pub = dos['freshness'].get('D_publication', {})
+        if pub.get('error'):
+            # Rien n'a pu etre cherche : ni « 0 phrase citable » ni un FAIL.
+            skip('{} resolveur'.format(iso), 'ReliefWeb indisponible : ' + pub['error'][:90])
+            continue
         cit = dos['citable']
         check('{} phrases citables'.format(iso), bool(cit), '{} phrase(s)'.format(len(cit)))
         check('{} toutes de portée nationale'.format(iso),
@@ -131,13 +159,23 @@ def main():
               bool(dos['gated']) == expect_gated)
         if cit:
             print('      « {} »'.format(cit[0]['sentence'][:132]))
+
+
+def main():
+    t0 = time.time()
+    d = DTMClient()
+    section('1. Le catalogue refuse ce qu\'il ne couvre pas', s1_refus, d)
+    section('2. Scope pays réel, et statut d\'accès par pays', s2_scope, d)
+    section('3. Lecture d\'un fichier + SOMME DE CONTRÔLE (ancre stable)', s3_checksum, d)
+    section('4. Résolveur : portée des phrases citables', s4_resolveur, d)
     finish(t0)
 
 
 def finish(t0):
     print()
     print('=' * 76)
-    print('{} OK / {} FAIL en {:.0f} s'.format(len(PASS), len(FAIL), time.time() - t0))
+    print('{} OK / {} FAIL / {} SKIP en {:.0f} s'.format(
+        len(PASS), len(FAIL), len(SKIP), time.time() - t0))
     if FAIL:
         print('ECHECS : {}'.format(', '.join(FAIL)))
     sys.exit(1 if FAIL else 0)

@@ -2,11 +2,18 @@
 Unified Country Data Fetcher
 =============================
 Fetch all secondary data sources for a given country (ISO3 code).
-Generates CSVs in data/{ISO3}/ directory.
+Writes CSVs to {ISO3}_data/raw/ and {ISO3}_data/catalogue/, plus two indexes:
+fetch_summary.csv (one row per source with its status) and data_inventory.csv
+(one row per file).
 
-Sources (14): ReliefWeb, HDX HAPI, HDX CKAN, IDMC, UNHCR, INFORM,
-         WFP HungerMap, World Bank, GDACS, HPC/FTS, IFRC Go
-         + optional ACLED, ACAPS, DTM.
+Sources (17): ReliefWeb, HDX HAPI, HDX CKAN, IDMC, UNHCR, INFORM, WFP HungerMap,
+         World Bank, ACLED, ACAPS, DTM (HDX), GDACS, HPC/FTS, IFRC GO,
+         IMPACT/REACH, DTM portal, Liveuamap. ACLED, ACAPS and IDMC need a free key.
+
+Every source ends in one status: ok, empty, partial, unavailable, error, skipped
+or not_covered. A failed source is never reported as zero records of data.
+Exit status: 0 when every source answered, 1 when one is partial, unavailable
+or in error, 2 on invalid arguments.
 
 Usage:
     python -X utf8 fetch_country_data.py LBN
@@ -17,7 +24,8 @@ Usage:
 Objectives: O4 (innovation), O5 (evidence-based), O2 (pack IM urgence)
 """
 import sys
-sys.stdout.reconfigure(encoding='utf-8')
+if hasattr(sys.stdout, 'reconfigure'):   # absent in Jupyter, IDLE, captured output
+    sys.stdout.reconfigure(encoding='utf-8')
 
 import os
 import csv
@@ -100,11 +108,83 @@ def _extract_date_range(records, date_field='date_start'):
     return min(dates), max(dates)
 
 
+# ─── Per-source outcome ─────────────────────────────────────
+# A source ends in exactly one of these states, written to fetch_summary.csv.
+# Only `ok` and `empty` are answers from the provider; every other state means
+# the files on disk say nothing about the country for that source.
+#   ok           the source answered with data
+#   empty        the source answered, with nothing for this country and period
+#   partial      some requests answered, others failed (see note): not a total
+#   unavailable  the provider could not be reached (outage, retry later)
+#   error        our side: a bug, or the provider changed its response
+#   skipped      not queried: missing free key, or excluded by a flag
+#   not_covered  the source has no coverage for this country
+FAILED_STATES = ('partial', 'unavailable', 'error')
+
+
+def _failure_state(exc):
+    """Which state an exception puts a source in."""
+    from config import MissingCredential, NotCovered, is_outage
+    if isinstance(exc, MissingCredential):
+        return 'skipped'
+    if isinstance(exc, NotCovered):
+        return 'not_covered'
+    return 'unavailable' if is_outage(exc) else 'error'
+
+
+def _short(exc):
+    return '{}: {}'.format(type(exc).__name__, str(exc).replace('\n', ' ')[:110])
+
+
+def _attempt(errors, label, fn, *args, **kwargs):
+    """Run one request of a source; on failure record it and return None.
+
+    A source is often several requests (HPC: plans, then flows). One failing
+    must not discard the others, and must not read as zero either: its result
+    is None (printed "n/a"), the failure is kept in `errors`, and the source can
+    no longer end `ok`.
+    """
+    try:
+        return fn(*args, **kwargs)
+    except Exception as e:  # noqa: BLE001 - recorded, never swallowed
+        errors.append((label, e))
+        print('  {} -> {} ({})'.format(label, _failure_state(e).upper(), _short(e)))
+        return None
+
+
+def _n(rows):
+    """Count for a note: 'n/a' when the request failed, never a fake 0."""
+    return 'n/a' if rows is None else len(rows)
+
+
+def _state(total_records, errors):
+    if not errors:
+        return 'ok' if total_records else 'empty'
+    if total_records:
+        return 'partial'
+    states = {_failure_state(e) for _, e in errors}
+    for s in ('error', 'unavailable', 'skipped'):
+        if s in states:
+            return s
+    return 'not_covered'
+
+
 def _make_result(source, category, total_records, disability_records, note,
-                 period_from='', period_to='', last_update='', files=None):
-    """Build a standardized result dict for fetch_summary."""
+                 period_from='', period_to='', last_update='', files=None,
+                 errors=None, status=None):
+    """Build a standardized result dict for fetch_summary.csv.
+
+    `errors` is the list filled by `_attempt`; `status` forces a state (e.g.
+    'skipped') when no request was made at all.
+    """
+    errors = errors or []
+    if errors:
+        failed = '; '.join('{} {}: {}'.format(label, _failure_state(e), _short(e))
+                           for label, e in errors)
+        note = '{} | {}'.format(note, failed) if note else failed
     return {
         'source': source,
+        'status': status or _state(total_records, errors),
         'category': category,
         'total_records': total_records,
         'disability_records': disability_records,
@@ -116,7 +196,7 @@ def _make_result(source, category, total_records, disability_records, note,
     }
 
 
-def save_csv(rows, filepath, fieldnames):
+def save_csv(rows, filepath, fieldnames, audit=True):
     """Save list of dicts to CSV. Retries on PermissionError (OneDrive lock).
 
     Delegates the empty/phantom-column audit to `config.audit_columns` so that
@@ -124,12 +204,16 @@ def save_csv(rows, filepath, fieldnames):
     `config.save_csv` used by ACLED/ACAPS) share one gate. Uses
     extrasaction='ignore' so a client can return extra keys without raising
     against the frozen header below (review 2026-07-25).
+
+    `audit=False` for the run's own indexes (fetch_summary, data_inventory):
+    their empty columns are facts about the run, not a renamed API field.
     """
     from config import audit_columns
     parent = os.path.dirname(os.path.abspath(filepath))
     if parent:
         os.makedirs(parent, exist_ok=True)
-    audit_columns(rows, filepath)
+    if audit:
+        audit_columns(rows, filepath)
     for attempt in range(3):
         try:
             with open(filepath, 'w', newline='', encoding='utf-8') as f:
@@ -148,51 +232,109 @@ def save_csv(rows, filepath, fieldnames):
                     os.path.basename(filepath)))
 
 
-def build_inventory(summaries, raw_dir, catalogue_dir=None):
-    """Build data_inventory.csv rows from fetch summaries.
+# The files each source writes, by exact name. Before a source runs, its files
+# from an earlier run are removed: a source that fails or finds nothing this time
+# must not leave last month's CSV on disk looking current, and listed as such in
+# data_inventory.csv. Only these exact names are ever deleted (never downloads).
+SOURCE_FILES = {
+    'reliefweb': ['reliefweb_facets.csv', 'reliefweb_sitreps.csv',
+                  'reliefweb_disability.csv'],
+    'hapi': ['hapi_idps.csv', 'hapi_op_presence.csv', 'hapi_funding.csv',
+             'hapi_risk.csv', 'hapi_conflict_events.csv', 'hapi_refugees.csv',
+             'hapi_food_security.csv', 'hapi_food_prices.csv', 'hapi_population.csv',
+             'hapi_humanitarian_needs.csv', 'hapi_returnees.csv', 'hapi_rainfall.csv'],
+    'hdx': ['hdx_all_datasets.csv'],
+    'idmc': ['idmc_displacement.csv', 'idmc_events.csv'],
+    'unhcr': ['unhcr_population.csv', 'unhcr_population_origin.csv',
+              'unhcr_demographics.csv', 'unhcr_solutions.csv'],
+    'inform': ['inform_risk.csv', 'inform_subnational.csv'],
+    'wfp': ['wfp_hungermap.csv', 'wfp_subnational.csv'],
+    'worldbank': ['worldbank_profile.csv'],
+    'acled': ['acled_events.csv', 'acled_cast_forecasts.csv'],
+    'acaps': ['acaps_severity.csv', 'acaps_access.csv'],
+    'dtm': ['dtm_datasets.csv'],
+    'gdacs': ['gdacs_alerts.csv'],
+    'hpc': ['hpc_plans.csv', 'hpc_funding_flows.csv'],
+    'ifrcgo': ['ifrcgo_emergencies.csv', 'ifrcgo_appeals.csv', 'ifrcgo_projects.csv'],
+    'impact': ['impact_all_resources.csv', 'impact_msna_datasets.csv'],
+    'dtm_portal': ['dtm_portal_datasets.csv'],
+    'liveuamap': ['liveuamap_events.csv'],
+}
+FILE_OWNER = {f: src for src, names in SOURCE_FILES.items() for f in names}
 
-    Scans raw_dir and catalogue_dir for actual CSV files produced by each source,
-    and returns one inventory row per file with records count, size, etc.
+
+def clear_previous_outputs(sources, dirs):
+    """Delete, for the sources about to run, the files an earlier run left."""
+    removed = []
+    for src in sources:
+        for fname in SOURCE_FILES.get(src, []):
+            for d in dirs:
+                path = os.path.join(d, fname)
+                if os.path.isfile(path):
+                    os.remove(path)
+                    removed.append(fname)
+    return removed
+
+
+def _count_rows(path):
+    """Data rows of a CSV, read as CSV (a quoted field may span several lines).
+
+    Returns (count, None) or (None, reason): an unreadable file is not 0 rows.
     """
-    # Map source display name -> summary dict
-    summary_by_source = {s['source']: s for s in summaries}
+    try:
+        with open(path, newline='', encoding='utf-8-sig') as f:
+            return max(0, sum(1 for _ in csv.reader(f)) - 1), None
+    except (OSError, UnicodeDecodeError, csv.Error) as e:
+        return None, '{}: {}'.format(type(e).__name__, str(e)[:60])
 
+
+def build_inventory(summaries, raw_dir, catalogue_dir=None, ran=None):
+    """Build data_inventory.csv rows: one per CSV file on disk.
+
+    A file is attributed to a source by its exact name (it used to be a substring
+    match, so a downloaded `events.csv` was credited to ACLED). A pipeline file
+    not refreshed by this run says so, and a file no source owns (a download)
+    is listed as such.
+    """
+    by_name = {}
+    for s in summaries:
+        for f in (s.get('files') or '').split(','):
+            if f.strip():
+                by_name[f.strip()] = s
+    ran = set(ran or [])
     inventory = []
     for directory, dir_label in [(raw_dir, 'raw'), (catalogue_dir, 'catalogue')]:
         if not directory or not os.path.isdir(directory):
             continue
         for fname in sorted(os.listdir(directory)):
-            if not fname.endswith('.csv') or fname == 'data_inventory.csv':
+            if not fname.endswith('.csv') or fname in ('data_inventory.csv',
+                                                       'fetch_summary.csv'):
                 continue
             fpath = os.path.join(directory, fname)
-            size = os.path.getsize(fpath)
-            # Count rows (excluding header)
-            records = 0
-            try:
-                with open(fpath, encoding='utf-8') as f:
-                    records = max(0, sum(1 for _ in f) - 1)
-            except Exception:
-                pass
-            # Find matching summary
-            matched = None
-            for s in summaries:
-                s_files = s.get('files', '')
-                if fname in s_files:
-                    matched = s
-                    break
+            records, unreadable = _count_rows(fpath)
+            matched = by_name.get(fname)
+            owner = FILE_OWNER.get(fname)
+            if matched:
+                note = matched.get('note', '')
+            elif owner and owner not in ran:
+                note = 'from an earlier run: not refreshed by this one'
+            else:
+                note = 'not written by the pipeline (download or manual file)'
+            if unreadable:
+                note = 'unreadable ({}) | {}'.format(unreadable, note)
             inventory.append({
                 'file': fname,
-                'source': matched['source'] if matched else '',
+                'source': (matched['source'] if matched else
+                           SOURCE_DISPLAY_NAMES.get(owner, '') if owner else ''),
                 'category': matched['category'] if matched else dir_label,
-                'records': records,
-                'size_bytes': size,
+                'records': '' if records is None else records,
+                'size_bytes': os.path.getsize(fpath),
                 'period_from': matched.get('period_from', '') if matched else '',
                 'period_to': matched.get('period_to', '') if matched else '',
                 'directory': dir_label,
-                'note': matched.get('note', '') if matched else '',
+                'note': note,
             })
     return inventory
-
 
 def fetch_reliefweb(iso3, output_dir, date_from=None, date_to=None):
     """Fetch ReliefWeb data: facets, sitreps, disability search."""
@@ -476,17 +618,22 @@ def fetch_hapi(iso3, output_dir, date_from=None, date_to=None):
 
 def fetch_hdx_ckan(iso3, output_dir):
     """List ALL HDX CKAN datasets for a country + MSNA-specific search."""
+    from config import SourceUnavailable
     from hdx_ckan_client import HDXClient
     hdx = HDXClient()
     files = []
+    errors = []
 
-    country_name = COUNTRY_NAMES.get(iso3, iso3.lower())
     print('\n--- HDX CKAN ---')
 
-    # 1. List ALL datasets for the country (comprehensive)
+    # 1. List ALL datasets for the country (comprehensive, paged to the end)
     all_datasets = hdx.list_all_datasets(iso3)
-    total_count = len(all_datasets)
-    print('  Total datasets for {}: {}'.format(iso3, total_count))
+    total_count = getattr(hdx, 'last_count', len(all_datasets))
+    print('  Total datasets for {}: {} (listed {})'.format(
+        iso3, total_count, len(all_datasets)))
+    if getattr(hdx, 'last_truncated', False):
+        errors.append(('HDX CKAN listing', SourceUnavailable(
+            'listed {} of {} datasets'.format(len(all_datasets), total_count))))
 
     if all_datasets:
         # Save full catalogue (1 row per dataset, no resource explosion)
@@ -497,35 +644,41 @@ def fetch_hdx_ckan(iso3, output_dir):
                 'dataset_name': ds['name'],
                 'dataset_title': ds['title'],
                 'org': ds['org'],
-                'dataset_date': ds.get('metadata_modified', ''),
+                # last metadata edit, NOT the period the data covers (HDX's
+                # own `dataset_date`): the column used to be named dataset_date
+                'metadata_modified': ds.get('metadata_modified', ''),
+                'data_period': ds.get('data_period_start', ''),
                 'license': ds.get('license', ''),
                 'num_resources': ds['num_resources'],
                 'formats': ', '.join(sorted(formats)),
                 'hdx_url': ds.get('url', ''),
             })
         save_csv(catalogue_rows, os.path.join(output_dir, 'hdx_all_datasets.csv'),
-                 ['dataset_name', 'dataset_title', 'org', 'dataset_date', 'license',
-                  'num_resources', 'formats', 'hdx_url'])
+                 ['dataset_name', 'dataset_title', 'org', 'metadata_modified',
+                  'data_period', 'license', 'num_resources', 'formats', 'hdx_url'])
         files.append('hdx_all_datasets.csv')
 
-    # 2. Filter for key themes (disability, needs, assessment)
-    disability_ds = hdx.list_all_datasets(iso3, theme_filter=[
-        'disability', 'disabled', 'handicap', 'inclusion'])
-    needs_ds = hdx.list_all_datasets(iso3, theme_filter=[
-        'needs assessment', 'msna', 'multi-sector'])
+    # 2. Filter for key themes (disability, needs, assessment), on the listing
+    # already fetched rather than three identical queries.
+    def themed(keywords):
+        return [ds for ds in all_datasets
+                if any(k in '{} {}'.format(ds['title'], ds.get('notes', '')).lower()
+                       for k in keywords)]
+    disability_ds = themed(['disability', 'disabled', 'handicap', 'inclusion'])
+    needs_ds = themed(['needs assessment', 'msna', 'multi-sector'])
 
     print('  Disability-related: {}'.format(len(disability_ds)))
     print('  Needs assessment: {}'.format(len(needs_ds)))
 
     return _make_result(
         source='HDX CKAN', category='catalogue',
-        total_records=total_count,
+        total_records=len(all_datasets),
         disability_records=len(disability_ds),
         files=files,
         note='{} datasets total, {} disability-related, {} needs assessments'.format(
             total_count, len(disability_ds), len(needs_ds)),
+        errors=errors,
     )
-
 
 def fetch_idmc(iso3, output_dir, date_from=None):
     """Fetch IDMC displacement data (annual figures + events)."""
@@ -534,15 +687,22 @@ def fetch_idmc(iso3, output_dir, date_from=None):
     files = []
 
     print('\n--- IDMC ---')
+    if not idmc.client_id:
+        print('  SKIPPED: no IDMC client_id configured')
+        return _make_result(
+            source='IDMC', category='raw', total_records=0, disability_records=0,
+            status='skipped',
+            note='Skipped - no client_id (keyring sds.idmc/client_id or IDMC_CLIENT_ID)',
+        )
 
     # Derive year_from from period date_from
     year_from = int(date_from[:4]) if date_from else 2018
-
-    overview = idmc.get_country_overview(iso3)
+    errors = []
     total = 0
 
-    data = idmc.get_displacement(iso3, year_from=year_from)
-    print('  Annual displacement: {} years'.format(len(data)))
+    data = _attempt(errors, 'IDMC displacements', idmc.get_displacement,
+                    iso3, year_from=year_from)
+    print('  Annual displacement: {} years'.format(_n(data)))
     if data:
         save_csv(data, os.path.join(output_dir, 'idmc_displacement.csv'),
                  ['iso3', 'year', 'conflict_new_displacements', 'disaster_new_displacements',
@@ -550,8 +710,9 @@ def fetch_idmc(iso3, output_dir, date_from=None):
         files.append('idmc_displacement.csv')
         total += len(data)
 
-    events = idmc.get_displacement_events(iso3, year_from=year_from)
-    print('  Displacement events: {}'.format(len(events)))
+    events = _attempt(errors, 'IDMC events', idmc.get_displacement_events,
+                      iso3, year_from=year_from)
+    print('  Displacement events: {}'.format(_n(events)))
     if events:
         save_csv(events, os.path.join(output_dir, 'idmc_events.csv'),
                  ['iso3', 'event_id', 'event_name', 'year', 'displacement_type',
@@ -560,14 +721,24 @@ def fetch_idmc(iso3, output_dir, date_from=None):
         total += len(events)
 
     p_from, p_to = _extract_date_range(events, 'start_date') if events else ('', '')
-    stock = overview.get('total_stock', 0) if overview else 0
+    # Stock of the latest year, read from the rows above (the old second request
+    # for an "overview" returned the same row). Never printed as 0 when unknown.
+    if data is None:
+        stock = 'n/a'
+    elif not data:
+        stock = 'no GIDD row'
+    else:
+        latest = data[-1]
+        stock = '{:,} ({})'.format(latest['conflict_stock'] + latest['disaster_stock'],
+                                   latest['year'])
     return _make_result(
         source='IDMC', category='raw',
         total_records=total,
         disability_records=0,
         period_from=p_from, period_to=p_to,
         files=files,
-        note='Stock {:,} IDPs, {} events since {}'.format(stock, len(events), year_from),
+        note='Stock {} IDPs, {} events since {}'.format(stock, _n(events), year_from),
+        errors=errors,
     )
 
 
@@ -643,54 +814,46 @@ def fetch_unhcr(iso3, output_dir, date_from=None):
 
 
 def fetch_inform(iso3, output_dir):
-    """Fetch INFORM Risk Index (national + subnational).
-
-    Note: JRC server has been restructured (late 2025). API may be temporarily
-    unavailable. Wrapped in try/except for graceful degradation.
-    """
+    """Fetch INFORM Risk Index (national + subnational)."""
     from inform_client import INFORMClient
     inform = INFORMClient()
 
     print('\n--- INFORM ---')
-
-    try:
-        risk = inform.get_country_risk(iso3)
-    except Exception as e:
-        print('  INFORM API temporarily unavailable: {}'.format(e))
-        return _make_result(
-            source='INFORM', category='raw',
-            total_records=0, disability_records=0,
-            note='API temporarily unavailable (JRC restructuring)',
-        )
-
+    errors = []
     files = []
     total = 0
+
+    risk = _attempt(errors, 'INFORM scores', inform.get_country_risk, iso3)
     if risk:
         save_csv([risk], os.path.join(output_dir, 'inform_risk.csv'),
                  list(risk.keys()))
         files.append('inform_risk.csv')
         total += 1
-        print('  Overall risk: {:.1f} (rank {})'.format(
-            risk.get('overall_risk', 0), risk.get('overall_rank', '')))
+        print('  Overall risk: {:.1f} ({})'.format(
+            risk.get('overall_risk', 0), risk.get('workflow_name', '')))
 
-    try:
-        subnational = inform.get_subnational(iso3)
-    except Exception:
-        subnational = []
-    print('  Subnational: {} admin units'.format(len(subnational)))
+    subnational = _attempt(errors, 'INFORM subnational', inform.get_subnational, iso3)
+    print('  Subnational: {} admin units'.format(_n(subnational)))
     if subnational:
         save_csv(subnational, os.path.join(output_dir, 'inform_subnational.csv'),
                  list(subnational[0].keys()))
         files.append('inform_subnational.csv')
         total += len(subnational)
 
+    if risk:
+        head = 'Risk {:.1f} ({})'.format(risk['overall_risk'], risk.get('workflow_name', ''))
+    elif risk is None:
+        head = 'Risk n/a'
+    else:
+        head = ('no INFORM Risk score for {} in the latest release (national risk '
+                'also in HAPI national-risk)'.format(iso3))
     return _make_result(
         source='INFORM', category='raw',
         total_records=total,
         disability_records=0,
         files=files,
-        note=('Risk {:.1f}, {} subnational units'.format(risk['overall_risk'], len(subnational))
-              if risk else 'INFORM API restructured (JRC) - national risk via HAPI national-risk'),
+        note='{}, {} subnational units'.format(head, _n(subnational)),
+        errors=errors,
     )
 
 
@@ -699,10 +862,11 @@ def fetch_wfp(iso3, output_dir):
     from wfp_client import WFPClient
     wfp = WFPClient()
     files = []
+    errors = []
 
     print('\n--- WFP HungerMap ---')
 
-    data = wfp.get_country_data(iso3)
+    data = _attempt(errors, 'WFP countryData', wfp.get_country_data, iso3)
     total = 0
     if data:
         save_csv([data], os.path.join(output_dir, 'wfp_hungermap.csv'),
@@ -712,21 +876,22 @@ def fetch_wfp(iso3, output_dir):
         fcs = data.get('fcs_people_insufficient', 0)
         print('  FCS insufficient: {:,} people'.format(fcs))
 
-    subnational = wfp.get_subnational(iso3)
-    print('  Subnational: {} admin units'.format(len(subnational)))
+    subnational = _attempt(errors, 'WFP subnational', wfp.get_subnational, iso3)
+    print('  Subnational: {} admin units'.format(_n(subnational)))
     if subnational:
         save_csv(subnational, os.path.join(output_dir, 'wfp_subnational.csv'),
                  list(subnational[0].keys()))
         files.append('wfp_subnational.csv')
         total += len(subnational)
 
+    fcs_state = 'n/a' if data is None else ('available' if data else 'none')
     return _make_result(
         source='WFP HungerMap', category='raw',
         total_records=total,
         disability_records=0,
         files=files,
-        note='{} subnational, FCS data {}'.format(
-            len(subnational), 'available' if data else 'unavailable'),
+        note='{} subnational, FCS data {}'.format(_n(subnational), fcs_state),
+        errors=errors,
     )
 
 
@@ -736,77 +901,90 @@ def fetch_worldbank(iso3, output_dir):
     wb = WorldBankClient()
 
     print('\n--- World Bank ---')
+    errors = []
 
-    profile = wb.get_country_profile(iso3, year_from=2015)
-    print('  Indicators: {}'.format(len(profile)))
+    profile = _attempt(errors, 'World Bank indicators', wb.get_country_profile,
+                       iso3, year_from=2015)
+    # The profile skips indicators that failed: each one makes the source partial.
+    for ind_id, e in getattr(wb, 'last_failures', []):
+        errors.append(('World Bank ' + ind_id, e))
+    print('  Indicators: {}'.format(_n(profile)))
     if profile:
         save_csv(profile, os.path.join(output_dir, 'worldbank_profile.csv'),
                  ['iso3', 'indicator_id', 'indicator_name', 'latest_year', 'latest_value'])
 
-    info = wb.get_country_info(iso3)
+    info = _attempt(errors, 'World Bank country', wb.get_country_info, iso3)
 
     return _make_result(
         source='World Bank', category='raw',
-        total_records=len(profile),
+        total_records=len(profile or []),
         disability_records=0,
         files=['worldbank_profile.csv'] if profile else [],
         note='{} indicators, income: {}'.format(
-            len(profile), info.get('income_level', 'N/A')),
+            _n(profile), (info or {}).get('income_level') or 'n/a'),
+        errors=errors,
     )
 
 
 def fetch_acled(iso3, output_dir, date_from=None, date_to=None):
     """Fetch ACLED direct conflict events + CAST forecasts (requires OAuth2 credentials)."""
-    from acled_client import ACLEDClient
+    from acled_client import ACLEDClient, acled_country_name
+    from config import NotCovered
 
     print('\n--- ACLED Direct ---')
     try:
         acled = ACLEDClient()
     except ValueError as e:
-        print('  SKIPPED: {}'.format(e))
+        print('  SKIPPED: {}'.format(str(e).splitlines()[0]))
         return _make_result(
             source='ACLED', category='raw',
             total_records=0, disability_records=0,
+            status='skipped',
             note='Skipped - no API key',
         )
+    try:
+        country_name = acled_country_name(iso3)
+    except NotCovered as e:
+        print('  NOT COVERED: {}'.format(e))
+        return _make_result(
+            source='ACLED', category='raw', total_records=0, disability_records=0,
+            status='not_covered', note=str(e))
 
     files = []
-    country_name = COUNTRY_NAMES.get(iso3, iso3.lower()).title()
-    events = acled.get_events(country_name, date_from=date_from or '2025-01-01',
-                              date_to=date_to)
-    print('  Events: {}'.format(len(events)))
+    errors = []
+    events = _attempt(errors, 'ACLED events', acled.get_events, country_name,
+                      date_from=date_from or '2025-01-01', date_to=date_to)
+    print('  Events: {}'.format(_n(events)))
 
     if events:
         acled.save_csv(events, os.path.join(output_dir, 'acled_events.csv'))
         files.append('acled_events.csv')
 
-    fatalities = sum(int(e.get('fatalities', 0) or 0) for e in events)
-
     # CAST forecasts
-    cast_count = 0
-    try:
-        forecasts = acled.get_cast_forecasts(country_name)
-        cast_count = len(forecasts)
-        print('  CAST forecasts: {}'.format(cast_count))
-        if forecasts:
-            acled.save_csv(forecasts, os.path.join(output_dir, 'acled_cast_forecasts.csv'))
-            files.append('acled_cast_forecasts.csv')
-    except Exception as e:
-        print('  CAST forecasts: unavailable ({})'.format(e))
+    forecasts = _attempt(errors, 'ACLED CAST', acled.get_cast_forecasts, country_name)
+    print('  CAST forecasts: {}'.format(_n(forecasts)))
+    if forecasts:
+        acled.save_csv(forecasts, os.path.join(output_dir, 'acled_cast_forecasts.csv'))
+        files.append('acled_cast_forecasts.csv')
 
-    note = '{} events, {:,} fatalities'.format(len(events), fatalities)
-    if cast_count:
-        note += ', {} CAST forecasts'.format(cast_count)
+    if events is None:
+        note = 'events n/a'
+    else:
+        fatalities = sum(int(e.get('fatalities', 0) or 0) for e in events)
+        note = '{} events, {:,} fatalities'.format(len(events), fatalities)
+    if forecasts:
+        note += ', {} CAST forecasts'.format(len(forecasts))
 
     p_from, p_to = _extract_date_range(events, 'event_date') if events else ('', '')
 
     return _make_result(
         source='ACLED', category='raw',
-        total_records=len(events) + cast_count,
+        total_records=len(events or []) + len(forecasts or []),
         disability_records=0,
         period_from=p_from, period_to=p_to,
         files=files,
         note=note,
+        errors=errors,
     )
 
 
@@ -816,33 +994,44 @@ def fetch_acaps(iso3, output_dir):
     acaps = ACAPSClient()
 
     print('\n--- ACAPS ---')
-    total = 0
+    if not acaps.api_key:
+        print('  SKIPPED: no ACAPS API key configured')
+        return _make_result(
+            source='ACAPS', category='raw', total_records=0, disability_records=0,
+            status='skipped',
+            note='Skipped - no API key (keyring sds.acaps/api_key or ACAPS_API_KEY)')
 
-    severity = acaps.get_inform_severity(iso3)
-    print('  Severity records: {}'.format(len(severity)))
+    total = 0
+    errors = []
+    files = []
+
+    severity = _attempt(errors, 'ACAPS inform-severity', acaps.get_inform_severity, iso3)
+    print('  Severity records: {}'.format(_n(severity)))
     if severity:
         acaps.save_csv(severity, os.path.join(output_dir, 'acaps_severity.csv'))
+        files.append('acaps_severity.csv')
         total += len(severity)
 
-    access = acaps.get_access_constraints(iso3)
-    print('  Access constraints: {}'.format(len(access)))
+    access = _attempt(errors, 'ACAPS humanitarian-access', acaps.get_access_constraints, iso3)
+    print('  Humanitarian access rows: {}'.format(_n(access)))
     if access:
         acaps.save_csv(access, os.path.join(output_dir, 'acaps_access.csv'))
+        files.append('acaps_access.csv')
         total += len(access)
 
-    files = []
-    if severity:
-        files.append('acaps_severity.csv')
-    if access:
-        files.append('acaps_access.csv')
-
-    sev_class = severity[0].get('severity_class', 'N/A') if severity else 'N/A'
+    if severity is None:
+        sev_class = 'n/a'
+    elif not severity:
+        sev_class = 'none'
+    else:
+        sev_class = severity[0].get('severity_class') or 'N/A'
     return _make_result(
         source='ACAPS', category='raw',
         total_records=total,
         disability_records=0,
         files=files,
-        note='Severity: {}, {} access constraints'.format(sev_class, len(access)),
+        note='Severity: {}, {} humanitarian-access rows'.format(sev_class, _n(access)),
+        errors=errors,
     )
 
 
@@ -861,7 +1050,7 @@ def fetch_dtm(iso3, output_dir):
     if datasets:
         rows = dtm.datasets_to_csv_rows(datasets)
         save_csv(rows, os.path.join(output_dir, 'dtm_datasets.csv'),
-                 ['dataset_name', 'dataset_title', 'org', 'date',
+                 ['dataset_name', 'dataset_title', 'org', 'metadata_modified',
                   'resource_name', 'resource_format', 'resource_url'])
         files.append('dtm_datasets.csv')
 
@@ -880,12 +1069,10 @@ def fetch_gdacs(iso3, output_dir, date_from=None):
     gdacs = GDACSClient()
     files = []
 
-    country_name = COUNTRY_NAMES.get(iso3, iso3.lower()).title()
     print('\n--- GDACS ---')
 
     # Compute days from date_from if provided
     if date_from:
-        from datetime import timedelta
         delta = datetime.now() - datetime.strptime(date_from, '%Y-%m-%d')
         days = max(int(delta.days), 1)
     else:
@@ -909,6 +1096,11 @@ def fetch_gdacs(iso3, output_dir, date_from=None):
     p_from, p_to = _extract_date_range(alerts, 'date_start') if alerts else ('', '')
     red = sum(1 for a in alerts if a['alert_level'] == 'Red')
     orange = sum(1 for a in alerts if a['alert_level'] == 'Orange')
+    errors = []
+    if getattr(gdacs, 'last_saturated', False):
+        errors.append(('GDACS window', ValueError(
+            'server limit reached: events older than the 300 most recent worldwide '
+            'were not examined, the list may be incomplete')))
     return _make_result(
         source='GDACS', category='raw',
         total_records=len(alerts),
@@ -916,6 +1108,7 @@ def fetch_gdacs(iso3, output_dir, date_from=None):
         period_from=p_from, period_to=p_to,
         files=files,
         note='{} alerts ({} red, {} orange)'.format(len(alerts), red, orange),
+        errors=errors,
     )
 
 
@@ -924,12 +1117,13 @@ def fetch_hpc(iso3, output_dir, date_from=None):
     from hpc_client import HPCClient
     hpc = HPCClient()
     files = []
+    errors = []
 
     print('\n--- HPC/FTS ---')
     total = 0
 
-    plans = hpc.get_plans(iso3)
-    print('  Response plans: {}'.format(len(plans)))
+    plans = _attempt(errors, 'HPC plans', hpc.get_plans, iso3)
+    print('  Response plans: {}'.format(_n(plans)))
     if plans:
         save_csv(plans, os.path.join(output_dir, 'hpc_plans.csv'),
                  ['plan_id', 'plan_name', 'plan_type', 'year',
@@ -939,8 +1133,10 @@ def fetch_hpc(iso3, output_dir, date_from=None):
 
     # Use year from period if provided, else current year
     flow_year = int(date_from[:4]) if date_from else datetime.now().year
-    flows = hpc.get_funding_flows(iso3, year=flow_year, limit=200)
-    print('  Funding flows ({}): {}'.format(flow_year, len(flows)))
+    flow_cap = 200
+    flows = _attempt(errors, 'HPC flows', hpc.get_funding_flows,
+                     iso3, year=flow_year, limit=flow_cap)
+    print('  Funding flows ({}): {}'.format(flow_year, _n(flows)))
     if flows:
         save_csv(flows, os.path.join(output_dir, 'hpc_funding_flows.csv'),
                  ['flow_id', 'amount_usd', 'source_org', 'destination_org',
@@ -949,15 +1145,24 @@ def fetch_hpc(iso3, output_dir, date_from=None):
         total += len(flows)
 
     p_from, p_to = _extract_date_range(flows, 'flow_date') if flows else ('', '')
-    total_funding = sum(float(f.get('amount_usd', 0) or 0) for f in flows)
+    # No sum of the flows here. The listed flows are capped (one page) and a flow
+    # appears once per boundary, so their sum is neither complete nor a total: the
+    # funding figure is the API aggregate carried by each plan (funding_usd).
+    latest = ''
+    if plans and plans[0].get('coverage_pct') is not None:
+        latest = ' (latest {}: {}% funded)'.format(plans[0]['year_max'],
+                                                    plans[0]['coverage_pct'])
+    capped = (', capped at {} - not the full list'.format(flow_cap)
+              if flows is not None and len(flows) >= flow_cap else '')
     return _make_result(
         source='HPC/FTS', category='raw',
         total_records=total,
         disability_records=0,
         period_from=p_from, period_to=p_to,
         files=files,
-        note='{} plans, {} flows (${:,.0f} total {})'.format(
-            len(plans), len(flows), total_funding, flow_year),
+        note='{} plans{}, {} flows listed for {}{}'.format(
+            _n(plans), latest, _n(flows), flow_year, capped),
+        errors=errors,
     )
 
 
@@ -968,42 +1173,40 @@ def fetch_ifrcgo(iso3, output_dir):
 
     print('\n--- IFRC Go ---')
     total = 0
+    files = []
+    errors = []
 
-    events = ifrc.get_emergencies(iso3=iso3, limit=50)
-    print('  Emergencies: {}'.format(len(events)))
+    events = _attempt(errors, 'IFRC GO emergencies', ifrc.get_emergencies,
+                      iso3=iso3, limit=50)
+    print('  Emergencies: {}'.format(_n(events)))
     if events:
         save_csv(events, os.path.join(output_dir, 'ifrcgo_emergencies.csv'),
-                 ['event_id', 'name', 'dtype', 'status', 'num_affected', 'num_dead',
+                 ['event_id', 'name', 'dtype', 'is_featured', 'num_affected', 'num_dead',
                   'num_injured', 'num_displaced', 'num_missing', 'date_start',
                   'countries', 'glide', 'appeal_amount_requested_chf',
                   'appeal_amount_funded_chf', 'currency'])
+        files.append('ifrcgo_emergencies.csv')
         total += len(events)
 
-    appeals = ifrc.get_appeals(iso3=iso3, limit=50)
-    print('  Appeals: {}'.format(len(appeals)))
+    appeals = _attempt(errors, 'IFRC GO appeals', ifrc.get_appeals, iso3=iso3, limit=50)
+    print('  Appeals: {}'.format(_n(appeals)))
     if appeals:
         save_csv(appeals, os.path.join(output_dir, 'ifrcgo_appeals.csv'),
                  ['appeal_id', 'code', 'name', 'atype', 'status', 'country',
                   'amount_requested_chf', 'amount_funded_chf', 'currency', 'coverage_pct',
                   'num_beneficiaries', 'start_date', 'end_date'])
+        files.append('ifrcgo_appeals.csv')
         total += len(appeals)
 
-    projects = ifrc.get_projects(iso3=iso3, limit=100)
-    print('  3W Projects: {}'.format(len(projects)))
+    projects = _attempt(errors, 'IFRC GO projects', ifrc.get_projects, iso3=iso3, limit=100)
+    print('  3W Projects: {}'.format(_n(projects)))
     if projects:
         save_csv(projects, os.path.join(output_dir, 'ifrcgo_projects.csv'),
                  ['project_id', 'name', 'reporting_ns', 'primary_sector',
                   'programme_type', 'status', 'budget_amount',
                   'target_total', 'reached_total', 'start_date', 'end_date'])
-        total += len(projects)
-
-    files = []
-    if events:
-        files.append('ifrcgo_emergencies.csv')
-    if appeals:
-        files.append('ifrcgo_appeals.csv')
-    if projects:
         files.append('ifrcgo_projects.csv')
+        total += len(projects)
 
     p_from, p_to = _extract_date_range(events, 'date_start') if events else ('', '')
     return _make_result(
@@ -1013,7 +1216,8 @@ def fetch_ifrcgo(iso3, output_dir):
         period_from=p_from, period_to=p_to,
         files=files,
         note='{} emergencies, {} appeals, {} projects'.format(
-            len(events), len(appeals), len(projects)),
+            _n(events), _n(appeals), _n(projects)),
+        errors=errors,
     )
 
 
@@ -1070,26 +1274,24 @@ def fetch_dtm_portal(iso3, output_dir, max_pages=3):
     `01b` detecte cette colonne -> le chemin catalogue -> selection ->
     telechargement fonctionne enfin de bout en bout.
     """
-    from dtm_client import DTMClient, UnmappedCountry
+    from config import SourceUnavailable
+    from dtm_client import DTMClient
     dtm = DTMClient()
+    errors = []
 
     print('\n--- DTM Portal (catalogue) ---')
-    try:
-        rows = dtm.browse_catalogue(iso3, max_pages=max_pages)
-    except UnmappedCountry as e:
-        print('  {}'.format(str(e)[:100]))
+    # UnmappedCountry is a NotCovered: it ends the source as `not_covered`.
+    rows = _attempt(errors, 'DTM catalogue', dtm.browse_catalogue, iso3,
+                    max_pages=max_pages)
+    if rows is None:
         return _make_result(
             source='DTM Portal', category='catalogue',
-            total_records=0, disability_records=0,
-            note='no DTM catalogue facet for {}'.format(iso3),
+            total_records=0, disability_records=0, note='', errors=errors,
         )
-    except Exception as e:
-        print('  DTM portal: {}'.format(str(e)[:100]))
-        return _make_result(
-            source='DTM Portal', category='catalogue',
-            total_records=0, disability_records=0,
-            note='portal error: {}'.format(str(e)[:80]),
-        )
+    if dtm.last_browse_error:
+        # Rows were read, then a later page failed: a partial listing.
+        errors.append(('DTM catalogue', SourceUnavailable(
+            'walk stopped at ' + dtm.last_browse_error)))
 
     n_open = sum(1 for r in rows if r['access'] == 'open')
     print('  {} datasets ({} telechargeables, {} verrouilles) sur {} page(s)'.format(
@@ -1112,44 +1314,93 @@ def fetch_dtm_portal(iso3, output_dir, max_pages=3):
         total_records=len(rows),
         disability_records=0,      # aucun produit DTM ne porte de ventilation handicap
         files=files,
-        note='{} datasets, {} downloadable ({} MSNA)'.format(
-            len(rows), n_open, len(msna)),
+        note='{} datasets, {} downloadable ({} MSNA), newest {} page(s) only'.format(
+            len(rows), n_open, len(msna), max_pages),
+        errors=errors,
     )
 
 
 def fetch_liveuamap(iso3, output_dir, date_from=None, date_to=None, max_pages=200):
     """Fetch Liveuamap conflict events for a country (scraping, no API key)."""
+    from config import SourceUnavailable
     from liveuamap_client import LiveuamapClient
     client = LiveuamapClient()
     files = []
+    errors = []
 
     print('\n--- Liveuamap ---')
 
-    events = client.get_events(iso3, max_pages=max_pages, date_from=date_from, date_to=date_to)
+    events = _attempt(errors, 'Liveuamap', client.get_events, iso3,
+                      max_pages=max_pages, date_from=date_from, date_to=date_to)
+    meta = client.last_meta or {}
+    if events is not None and meta.get('stopped_on_errors'):
+        errors.append(('Liveuamap pagination', SourceUnavailable(
+            'stopped after repeated errors at page {}: older events missing'
+            .format(meta.get('pages')))))
+    if events is not None and meta.get('truncated_before'):
+        errors.append(('Liveuamap window', ValueError(
+            '--max-pages {} reached at {} before --date-from {}: the period is only '
+            'partly covered, raise --max-pages'.format(
+                max_pages, meta['truncated_before'], date_from))))
 
     if events:
         save_csv(events, os.path.join(output_dir, 'liveuamap_events.csv'),
-                 ['event_id', 'datetime', 'event_type', 'cat_id', 'color_id',
-                  'name', 'location', 'lat', 'lng',
+                 ['event_id', 'feed', 'feed_scope', 'datetime', 'event_type', 'cat_id',
+                  'color_id', 'name', 'location', 'lat', 'lng',
                   'source_url', 'link', 'picture'])
         files.append('liveuamap_events.csv')
 
+    note = '{} conflict events (scraped)'.format(_n(events))
+    if meta.get('feed_scope') == 'binational':
+        note += '; binational feed "{}": events not split by country'.format(
+            meta.get('subdomain'))
+    if meta.get('stale_days'):
+        # A frozen feed returns few or no recent events: that is not calm.
+        note += '; feed STALE, newest event {} ({} days old)'.format(
+            meta['newest_event'], meta['stale_days'])
     p_from, p_to = _extract_date_range(events, 'datetime') if events else ('', '')
     return _make_result(
         source='Liveuamap', category='raw',
-        total_records=len(events),
+        total_records=len(events or []),
         disability_records=0,
         period_from=p_from, period_to=p_to,
         files=files,
-        note='{} conflict events (scraped)'.format(len(events)),
+        note=note,
+        errors=errors,
     )
 
 
+def _iso_date(value):
+    """argparse type: a YYYY-MM-DD date, kept as the string the clients expect.
+
+    Validated once here because the sources disagreed on a malformed date: GDACS
+    raised, HPC read the first 4 characters, Liveuamap ignored it and fetched the
+    whole feed without any date filter.
+    """
+    try:
+        datetime.strptime(value, '%Y-%m-%d')
+    except ValueError:
+        raise argparse.ArgumentTypeError(
+            'expected a date as YYYY-MM-DD, got {!r}'.format(value))
+    return value
+
+
+SUMMARY_FIELDS = ['source', 'status', 'category', 'total_records',
+                  'disability_records', 'period_from', 'period_to', 'files', 'note']
+
+
 def main():
-    parser = argparse.ArgumentParser(description='Fetch secondary data for a country')
+    parser = argparse.ArgumentParser(
+        description='Fetch secondary data for a country',
+        epilog='Exit status: 0 when every requested source answered (ok, empty, '
+               'skipped or not covered), 1 when at least one source is partial, '
+               'unavailable or in error, 2 on invalid arguments.')
     parser.add_argument('iso3', help='ISO3 country code (e.g., LBN, SDN, SYR)')
-    parser.add_argument('--date-from', help='Start date YYYY-MM-DD (for ReliefWeb/ACLED)')
-    parser.add_argument('--date-to', help='End date YYYY-MM-DD (for ReliefWeb)')
+    parser.add_argument('--date-from', type=_iso_date,
+                        help='Start date YYYY-MM-DD (ReliefWeb, HAPI, IDMC, UNHCR, '
+                             'ACLED, GDACS, HPC flows year, Liveuamap)')
+    parser.add_argument('--date-to', type=_iso_date,
+                        help='End date YYYY-MM-DD (ReliefWeb, HAPI, ACLED, Liveuamap)')
     parser.add_argument('--skip-hdx', action='store_true', help='Skip HDX CKAN search')
     parser.add_argument('--skip-acled', action='store_true', help='Skip ACLED (needs API key)')
     parser.add_argument('--skip-acaps', action='store_true', help='Skip ACAPS (needs API key)')
@@ -1158,9 +1409,11 @@ def main():
     parser.add_argument('--skip-gdacs', action='store_true', help='Skip GDACS')
     parser.add_argument('--skip-hpc', action='store_true', help='Skip HPC/FTS')
     parser.add_argument('--skip-ifrcgo', action='store_true', help='Skip IFRC Go')
-    parser.add_argument('--only', help='Comma-separated list of sources to fetch (e.g., reliefweb,hapi,idmc)')
+    parser.add_argument('--only', help='Comma-separated list of sources to fetch '
+                                       '(e.g., reliefweb,hapi,idmc)')
     parser.add_argument('--output-dir', help='Override output directory')
-    parser.add_argument('--max-pages', type=int, default=200, help='Max pagination pages for Liveuamap (default 200)')
+    parser.add_argument('--max-pages', type=int, default=200,
+                        help='Max pagination pages for Liveuamap (default 200)')
     args = parser.parse_args()
 
     # Validated, not just upper-cased: this value becomes a directory name below.
@@ -1170,34 +1423,42 @@ def main():
     except ValueError as e:
         print(e)
         return 2
+    if args.date_from and args.date_to and args.date_from > args.date_to:
+        print('--date-from {} is after --date-to {}'.format(args.date_from, args.date_to))
+        return 2
+
+    # Determine which sources to run. An unknown name is an error before any
+    # request, not a warning lost in the middle of a 17-source run.
+    skipped_by_flag = []
+    skip_flags = [k for k in ('hdx', 'acled', 'acaps', 'worldbank', 'dtm', 'gdacs',
+                              'hpc', 'ifrcgo') if getattr(args, 'skip_' + k)]
+    if args.only and skip_flags:
+        # --only used to override every --skip-* without a word.
+        print('--only and --skip-* cannot be combined: list the sources you want '
+              'in --only instead.')
+        return 2
+    if args.only:
+        sources = [s.strip().lower() for s in args.only.split(',') if s.strip()]
+        unknown = [s for s in sources if s not in ALL_SOURCES]
+        if unknown:
+            print('Unknown source(s) in --only: {}. Available: {}'.format(
+                ', '.join(unknown), ', '.join(ALL_SOURCES)))
+            return 2
+    else:
+        sources = list(ALL_SOURCES)
+        for key in ('hdx', 'acled', 'acaps', 'worldbank', 'dtm', 'gdacs', 'hpc',
+                    'ifrcgo'):
+            if getattr(args, 'skip_' + key):
+                sources.remove(key)
+                skipped_by_flag.append(key)
+
     # Output: {ISO3}_data/ with raw/ and catalogue/ subdirs
     base_dir = args.output_dir or os.path.join(PROJECT_DIR, '{}_data'.format(iso3))
     output_dir = os.path.join(base_dir, 'raw')           # raw data CSVs
     catalogue_dir = os.path.join(base_dir, 'catalogue')  # dataset listings
     os.makedirs(output_dir, exist_ok=True)
     os.makedirs(catalogue_dir, exist_ok=True)
-
-    # Determine which sources to run
-    if args.only:
-        sources = [s.strip().lower() for s in args.only.split(',')]
-    else:
-        sources = list(ALL_SOURCES)
-        if args.skip_hdx:
-            sources.remove('hdx')
-        if args.skip_acled:
-            sources.remove('acled')
-        if args.skip_acaps:
-            sources.remove('acaps')
-        if args.skip_worldbank:
-            sources.remove('worldbank')
-        if args.skip_dtm:
-            sources.remove('dtm')
-        if args.skip_gdacs:
-            sources.remove('gdacs')
-        if args.skip_hpc:
-            sources.remove('hpc')
-        if args.skip_ifrcgo:
-            sources.remove('ifrcgo')
+    stale = clear_previous_outputs(sources, [output_dir, catalogue_dir])
 
     print('=' * 60)
     print('Secondary Data Sources - {} ({})'.format(iso3, datetime.now().strftime('%Y-%m-%d %H:%M')))
@@ -1205,6 +1466,8 @@ def main():
     print('Sources: {}'.format(', '.join(sources)))
     if args.date_from:
         print('Period: {} -> {}'.format(args.date_from, args.date_to or 'now'))
+    if stale:
+        print('Removed {} file(s) of these sources from an earlier run'.format(len(stale)))
     print('=' * 60)
 
     summaries = []
@@ -1237,30 +1500,42 @@ def main():
     }
 
     for source in sources:
-        if source not in dispatch:
-            print('\n  WARNING: Unknown source "{}", skipping'.format(source))
-            continue
+        name = SOURCE_DISPLAY_NAMES.get(source, source)
         try:
             summaries.append(dispatch[source]())
-        except Exception as e:
-            print('  ERROR {}: {}'.format(source, e))
+        except Exception as e:  # noqa: BLE001 - recorded with its state below
+            print('  {} {}: {}'.format(_failure_state(e).upper(), source, _short(e)))
             summaries.append(_make_result(
-                source=SOURCE_DISPLAY_NAMES.get(source, source),
-                category=SOURCE_CATEGORIES.get(source, ''),
-                total_records=0, disability_records=0, note=str(e),
+                source=name, category=SOURCE_CATEGORIES.get(source, ''),
+                total_records=0, disability_records=0, note='',
+                errors=[(name, e)],
             ))
+    for source in skipped_by_flag:
+        summaries.append(_make_result(
+            source=SOURCE_DISPLAY_NAMES.get(source, source),
+            category=SOURCE_CATEGORIES.get(source, ''),
+            total_records=0, disability_records=0, status='skipped',
+            note='excluded by --skip-{}'.format(source)))
+
+    # One row per source, whatever happened to it. Before this file came back, a
+    # source that failed left no trace on disk: its missing CSV was
+    # indistinguishable from a country without data.
+    save_csv(summaries, os.path.join(base_dir, 'fetch_summary.csv'), SUMMARY_FIELDS,
+             audit=False)
 
     # Data inventory - 1 row per file across both dirs
-    inventory = build_inventory(summaries, output_dir, catalogue_dir)
+    inventory = build_inventory(summaries, output_dir, catalogue_dir, ran=sources)
     if inventory:
-        save_csv(inventory, os.path.join(base_dir, 'data_inventory.csv'), INVENTORY_FIELDS)
+        save_csv(inventory, os.path.join(base_dir, 'data_inventory.csv'),
+                 INVENTORY_FIELDS, audit=False)
 
     print('\n' + '=' * 60)
     print('SUMMARY - {}'.format(iso3))
     print('=' * 60)
     for s in summaries:
-        print('  {} [{}] - {} records (disability: {}) | {}'.format(
-            s['source'], s['category'], s['total_records'], s['disability_records'], s['note']))
+        print('  {:<14} {:<11} {:>6} records (disability: {}) | {}'.format(
+            s['source'], s['status'].upper(), s['total_records'],
+            s['disability_records'], s['note']))
 
     # List files
     raw_files = [f for f in sorted(os.listdir(output_dir))
@@ -1282,6 +1557,15 @@ def main():
     print('\nOutput: {}'.format(os.path.abspath(base_dir)))
 
     print('=' * 60)
+    failed = [s for s in summaries if s['status'] in FAILED_STATES]
+    if failed:
+        print('INCOMPLETE: {} of {} sources did not answer in full ({}).'.format(
+            len(failed), len(summaries),
+            ', '.join('{} {}'.format(s['source'], s['status']) for s in failed)))
+        print('A source without a file above FAILED: that is not an absence of data '
+              'for {}. Details in fetch_summary.csv.'.format(iso3))
+        return 1
+    return 0
 
 
 if __name__ == '__main__':

@@ -28,12 +28,12 @@ IDN,Indonesia,indonesia,dedicated
 IRN,Iran,iran,dedicated
 IRQ,Iraq,iraq,dedicated
 IRL,Ireland,ireland,dedicated
-ISR,Israel/Palestine,israelpalestine,dedicated
+ISR,Israel/Palestine,israelpalestine,binational
 ITA,Italy,italy,dedicated
 JPN,Japan,japan,dedicated
 KEN,Kenya,kenya,dedicated
-KOR,South Korea,koreas,dedicated
-PRK,North Korea,koreas,dedicated
+KOR,South Korea,koreas,binational
+PRK,North Korea,koreas,binational
 LBN,Lebanon,lebanon,dedicated
 LBY,Libya,libya,dedicated
 MLI,Mali,sahel,regional
@@ -47,7 +47,7 @@ NIC,Nicaragua,nicaragua,dedicated
 NER,Niger,sahel,regional
 NGA,Nigeria,nigeria,dedicated
 PAK,Pakistan,pakistan,dedicated
-PSE,Palestine,israelpalestine,dedicated
+PSE,Palestine,israelpalestine,binational
 PAN,Panama,panama,dedicated
 PER,Peru,peru,dedicated
 PHL,Philippines,philippines,dedicated
@@ -58,8 +58,7 @@ RUS,Russia,russia,dedicated
 SAU,Saudi Arabia,saudiarabia,dedicated
 ZAF,South Africa,southafrica,dedicated
 SOM,Somalia,somalia,dedicated
-KOR,South Korea,koreas,dedicated
-SSD,South Sudan,sudan,regional
+SSD,South Sudan,sudan,borrowed
 ESP,Spain,spain,dedicated
 LKA,Sri Lanka,srilanka,dedicated
 SDN,Sudan,sudan,dedicated

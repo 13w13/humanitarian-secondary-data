@@ -28,23 +28,26 @@ Usage (as library):
 License: MIT
 """
 import sys
-sys.stdout.reconfigure(encoding='utf-8')
+if hasattr(sys.stdout, 'reconfigure'):   # absent in Jupyter, IDLE, captured output
+    sys.stdout.reconfigure(encoding='utf-8')
 
 import csv
 import os
 import re
 import time
+import zipfile
 from urllib.request import Request, urlopen
-from urllib.error import URLError, HTTPError
 
 # Add clients/ to path for config import
 sys.path.insert(0, os.path.join(os.path.dirname(os.path.abspath(__file__)), 'clients'))
 
 try:
-    from config import USER_AGENT, DEFAULT_TIMEOUT
+    from config import USER_AGENT, DEFAULT_TIMEOUT, safe_opener, sniff_mismatch, \
+        safe_filename
 except ImportError:
     USER_AGENT = 'humanitarian-secondary-data/1.0'
     DEFAULT_TIMEOUT = 60
+    safe_opener = sniff_mismatch = safe_filename = None
 
 # --- URL column detection ---
 
@@ -63,7 +66,6 @@ URL_COLUMNS = {
 # Domains where URLs point to actual downloadable files
 DOWNLOADABLE_DOMAINS = [
     'repository.impact-initiatives.org',
-    'data.humdata.org/dataset/',       # HDX resource direct links
     # DTM sert ses fichiers via un tracker SANS extension dans l'URL
     # (`/dtm_download_track/{id}?file=1&type=node&id=N` -> content-disposition
     # xlsx). L'heuristique par extension le ratait -> 2 250 fichiers invisibles.
@@ -92,6 +94,11 @@ def _is_downloadable(url):
     """Check if a URL points to a direct file download."""
     if not url:
         return False
+    if 'data.humdata.org/dataset/' in url.lower():
+        # A dataset PAGE is not a file: only /resource/<id>/download/<name> is.
+        # Every hdx_url used to count as downloadable, and its HTML was saved
+        # into raw/ as a data file.
+        return '/download/' in url.lower()
     for domain in DOWNLOADABLE_DOMAINS:
         if domain in url:
             return True
@@ -102,11 +109,25 @@ def _is_downloadable(url):
 
 
 def _safe_filename(url):
-    """Extract filename from URL."""
+    """Extract filename from URL: one path component, extension kept."""
     from urllib.parse import unquote
     fname = unquote(url.split('/')[-1].split('?')[0])
-    fname = re.sub(r'[<>:"/\\|?*]', '_', fname)
-    return fname[:150] if fname else 'unknown'
+    fname = re.sub(r'[<>:"/\\|?*\x00-\x1f]', '_', fname).strip(' .')
+    if not fname:                      # also '.', '..', '%2e%2e'
+        return 'unknown'
+    stem, ext = os.path.splitext(fname)
+    return stem[:150 - len(ext)] + ext  # a long name used to lose its .xlsx
+
+
+def _disposition_name(resp):
+    """File name from Content-Disposition, reduced to one safe component."""
+    cd = resp.headers.get('Content-Disposition') or ''
+    m = re.search(r"filename\*=(?:UTF-8'')?([^;]+)|filename=\"?([^\";]+)", cd, re.I)
+    if not m:
+        return None
+    from urllib.parse import unquote
+    name = unquote((m.group(1) or m.group(2)).strip())
+    return safe_filename(name) if safe_filename else _safe_filename(name)
 
 
 def _headers_for(url):
@@ -156,7 +177,9 @@ def _download_file(url, dest_path, timeout=DEFAULT_TIMEOUT,
     tmp_path = dest_path + '.part'
     req = Request(url, headers=_headers_for(url))
     try:
-        resp = urlopen(req, timeout=timeout)
+        # Redirects are followed to http(s) only (urllib alone follows ftp://).
+        resp = safe_opener().open(req, timeout=timeout) if safe_opener else \
+            urlopen(req, timeout=timeout)
         # Trust the declared length only to fail EARLY; the real check is the
         # running total below, since Content-Length can lie or be absent.
         declared = resp.headers.get('Content-Length')
@@ -164,28 +187,52 @@ def _download_file(url, dest_path, timeout=DEFAULT_TIMEOUT,
             return False, 'declared size {:,} B exceeds cap {:,} B'.format(
                 int(declared), max_bytes)
 
+        # DTM serves files from an extension-less tracker URL (.../100046): the
+        # real name, with its extension, is in Content-Disposition.
+        if not os.path.splitext(dest_path)[1]:
+            named = _disposition_name(resp)
+            if named:
+                dest_path = '{}_{}'.format(dest_path, named)
+                tmp_path = dest_path + '.part'
+
         os.makedirs(os.path.dirname(os.path.abspath(dest_path)), exist_ok=True)
-        written = 0
+        written, first = 0, b''
         with open(tmp_path, 'wb') as f:
             while True:
                 chunk = resp.read(DOWNLOAD_CHUNK)
                 if not chunk:
                     break
+                if not first:
+                    first = chunk[:512]
                 written += len(chunk)
                 if written > max_bytes:
                     raise OSError('exceeded cap {:,} B while streaming'.format(max_bytes))
                 f.write(chunk)
         if written == 0:
             raise OSError('empty response body')
+        # read() returns b'' at a premature EOF: without this check a dropped
+        # connection was published as a complete (short) file.
+        if declared and declared.isdigit() and written != int(declared):
+            raise OSError('truncated: {:,} of {:,} declared bytes'.format(
+                written, int(declared)))
+        why = sniff_mismatch(first, dest_path) if sniff_mismatch else None
+        if why:
+            raise OSError(why)
+        if dest_path.lower().endswith(('.xlsx', '.xlsm', '.zip')) \
+                and not zipfile.is_zipfile(tmp_path):
+            raise OSError('incomplete zip container (truncated download?)')
         os.replace(tmp_path, dest_path)          # atomic on the same filesystem
         return True, written
-    except (HTTPError, URLError, OSError) as e:
+    except Exception as e:  # noqa: BLE001 - reported to the caller, never raised
+        # Any failure (IncompleteRead, InvalidURL, a null byte in the name...)
+        # used to escape this handler, abort the batch and leave the .part.
+        return False, '{}: {}'.format(type(e).__name__, str(e)[:120])
+    finally:
         try:
             if os.path.exists(tmp_path):
                 os.remove(tmp_path)
         except OSError:
             pass
-        return False, str(e)
 
 
 def scan_catalogue(catalogue_dir):
@@ -258,8 +305,11 @@ def _get_key():
 def select_resources(downloadable):
     """Interactive checkbox selection: arrows to move, space to toggle, enter to confirm.
 
-    Returns filtered list of resources to download.
+    Returns filtered list of resources to download. Without a terminal (an agent,
+    CI, a pipe) raw mode is impossible: fall back to typed numbers.
     """
+    if not sys.stdin.isatty():
+        return _select_by_numbers(downloadable)
     n = len(downloadable)
     selected = [False] * n
     cursor = 0
@@ -319,6 +369,30 @@ def select_resources(downloadable):
     return [downloadable[i] for i in range(n) if selected[i]]
 
 
+def _select_by_numbers(downloadable):
+    """Numbered list and one line of input: "1,3,5-7", "all", or empty for none."""
+    for i, r in enumerate(downloadable, 1):
+        print('  {:>3}. {}'.format(i, (r.get('title') or _safe_filename(r['url']))[:70]))
+    try:
+        line = input('Numbers to download (e.g. 1,3,5-7 or all; empty = none): ')
+    except EOFError:
+        print('\n  no input: nothing selected')
+        return []
+    line = line.strip().lower()
+    if line == 'all':
+        return list(downloadable)
+    picked = set()
+    for part in line.replace(' ', '').split(','):
+        if not part:
+            continue
+        a, _, b = part.partition('-')
+        if a.isdigit() and (not b or b.isdigit()):
+            picked.update(range(int(a), int(b or a) + 1))
+        else:
+            print('  ignored: {!r}'.format(part))
+    return [r for i, r in enumerate(downloadable, 1) if i in picked]
+
+
 def _mark_downloaded(catalogue_dir, downloaded_urls):
     """Add 'downloaded' column to catalogue CSVs for downloaded URLs."""
     if not downloaded_urls:
@@ -354,8 +428,8 @@ def _mark_downloaded(catalogue_dir, downloaded_urls):
                     writer = csv.DictWriter(f, fieldnames=out_fields, extrasaction='ignore')
                     writer.writeheader()
                     writer.writerows(rows)
-        except Exception:
-            pass
+        except Exception as e:  # noqa: BLE001 - a marker, never worth aborting for
+            print('  could not mark downloads in {}: {}'.format(fname, str(e)[:80]))
 
 
 def download_from_catalogue(catalogue_dir, output_dir,
@@ -411,7 +485,8 @@ def download_from_catalogue(catalogue_dir, output_dir,
             return {'downloaded': 0, 'skipped': 0, 'failed': 0, 'not_downloadable': len(listings)}
         print('\n{} selected for download.\n'.format(len(downloadable)))
 
-    os.makedirs(output_dir, exist_ok=True)
+    if not dry_run:          # a dry run writes nothing, not even a folder
+        os.makedirs(output_dir, exist_ok=True)
 
     counts = {'downloaded': 0, 'skipped': 0, 'failed': 0, 'not_downloadable': len(listings)}
     downloaded_urls = []
@@ -425,6 +500,11 @@ def download_from_catalogue(catalogue_dir, output_dir,
                 r.get('title', '')[:35], fname[:40]))
             continue
 
+        if skip_existing and not os.path.splitext(fname)[1] and os.path.isdir(output_dir):
+            # tracker URL saved under "{id}_{real name}" (see _download_file)
+            prior = [f for f in os.listdir(output_dir) if f.startswith(fname + '_')]
+            if prior:
+                dest = os.path.join(output_dir, prior[0])
         if skip_existing and os.path.exists(dest):
             size = os.path.getsize(dest)
             print('  [{}/{}] EXISTS ({:,} bytes) {}'.format(
@@ -546,6 +626,12 @@ def main():
                         help='Interactive selection: pick which datasets to download')
     args = parser.parse_args()
 
+    if not os.path.isdir(args.catalogue_dir):
+        # Used to scan nothing and report "Total: 0 resources", exit 0.
+        print('Catalogue directory not found: {} (run 01_fetch.py first, or pass '
+              '--catalogue-dir {{ISO3}}_data/catalogue)'.format(args.catalogue_dir))
+        return 2
+
     if args.scan:
         resources = scan_catalogue(args.catalogue_dir)
         by_file = {}
@@ -559,7 +645,7 @@ def main():
             print('  {} — {} resources ({} downloadable)'.format(fname, len(items), dl))
         print('\nTotal: {} resources ({} downloadable)'.format(
             len(resources), sum(1 for r in resources if r['downloadable'])))
-        return
+        return 0
 
     counts = download_from_catalogue(
         args.catalogue_dir, args.output_dir,
@@ -573,7 +659,8 @@ def main():
         print('Downloaded: {}, Skipped: {}, Failed: {}, Listings: {}'.format(
             counts['downloaded'], counts['skipped'],
             counts['failed'], counts['not_downloadable']))
+    return 1 if counts['failed'] else 0
 
 
 if __name__ == '__main__':
-    main()
+    sys.exit(main())

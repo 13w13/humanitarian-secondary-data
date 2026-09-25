@@ -25,7 +25,8 @@ Note on DTM API: only IDP figures, NOT MSNA microdata. Auth: Ocp-Apim-Subscripti
 Note on Portal: Drupal, scrapable by URL, download direct, no auth for public datasets.
 """
 import sys
-sys.stdout.reconfigure(encoding='utf-8')
+if hasattr(sys.stdout, 'reconfigure'):   # absent in Jupyter, IDLE, captured output
+    sys.stdout.reconfigure(encoding='utf-8')
 
 import json
 import os
@@ -38,7 +39,8 @@ from urllib.parse import urlencode, quote
 from html import unescape as _unescape
 from config import (
     HDX_CKAN_BASE, DTM_API_BASE, DEFAULT_TIMEOUT, RATE_LIMIT_DELAY,
-    USER_AGENT, save_csv
+    USER_AGENT, save_csv, MissingCredential, NotCovered, raise_unavailable,
+    SourceUnavailable, safe_opener, safe_filename, MAX_DOWNLOAD_BYTES, get_credential
 )
 
 
@@ -165,7 +167,7 @@ DTM_CATALOGUE_COUNTRIES = {
 PORTAL_COUNTRY_IDS = {k: v[2] for k, v in DTM_CATALOGUE_COUNTRIES.items()}
 
 
-class NoApiAccess(Exception):
+class NoApiAccess(MissingCredential):
     """No DTM subscription key configured: "no access", not "no data"."""
 
 
@@ -173,7 +175,7 @@ class WrongCountry(Exception):
     """The DTM response describes a country other than the one requested."""
 
 
-class UnmappedCountry(Exception):
+class UnmappedCountry(NotCovered):
     """No DTM catalogue facet for this country: refuse rather than search blind.
 
     The catalogue's `search=` parameter is full text, NOT a country scope
@@ -214,15 +216,8 @@ class DTMClient:
     @staticmethod
     def _resolve_key():
         """Subscription key from keyring sds.dtm/subscription_key, else env."""
-        try:
-            import keyring
-            k = keyring.get_password('sds.dtm', 'subscription_key')
-            if k:
-                return k
-        except Exception:
-            pass
-        return (os.environ.get('DTM_SUBSCRIPTION_KEY')
-                or os.environ.get('DTMAPI_SUBSCRIPTION_KEY', ''))
+        return get_credential('sds.dtm', 'subscription_key',
+                              'DTM_SUBSCRIPTION_KEY', 'DTMAPI_SUBSCRIPTION_KEY')
 
     def has_api_access(self):
         """True when a subscription key is configured.
@@ -311,11 +306,7 @@ class DTMClient:
     def _api_v3_get(self, endpoint, params=None):
         """GET request to DTM API v3 (requires subscription key)."""
         if not self.api_key:
-            try:
-                import keyring
-                self.api_key = keyring.get_password('sds.dtm', 'subscription_key') or ''
-            except Exception:
-                pass
+            self.api_key = self._resolve_key()
         if not self.api_key:
             raise ValueError(
                 'No DTM API key. Set DTMAPI_SUBSCRIPTION_KEY env var '
@@ -464,7 +455,9 @@ class DTMClient:
         # request) - the failure mode that made IDMC and GDACS uncheckable.
         if out and iso3:
             got = {str(r['iso3']).upper() for r in out if r['iso3']}
-            if got and iso3.upper() not in got:
+            # Every row: a mix of SDN and SSD rows used to pass because SDN was
+            # among them, and the snapshot then summed both countries.
+            if got and (iso3.upper() not in got or got - {iso3.upper()}):
                 raise WrongCountry(
                     'DTM: asked for Admin0Pcode={} but the response describes {} '
                     '-> filter not honoured.'.format(iso3.upper(), sorted(got)[:5]))
@@ -562,8 +555,11 @@ class DTMClient:
             s['age_days'] = age_op
             # Late by more than 3 publication cycles (floor 45 days to avoid
             # flagging a daily feed that paused for a week).
-            s['stale'] = bool(cadence and age_op is not None
-                              and age_op > max(3 * cadence, 45))
+            # With a single reporting date there is no cadence: fall back to an
+            # absolute threshold (a 2020 snapshot used to count as "not stale" and
+            # then served as the reference that threw out correct 2026 figures).
+            s['stale'] = bool(age_op is not None and (
+                age_op > max(3 * cadence, 45) if cadence else age_op > 180))
             s['late_by_cycles'] = (round(age_op / cadence, 1)
                                    if cadence and age_op is not None else None)
 
@@ -710,7 +706,13 @@ class DTMClient:
         expected slug (empty is tolerated: 42 of 2,375 rows are regional products
         such as "Europe — Mixed Migration Flows"). A mismatch raises WrongCountry
         rather than returning another country's datasets.
+
+        Failures are never an empty list: the first page unreachable raises
+        SourceUnavailable, a first page that parses to nothing for a mapped
+        country raises ValueError (layout changed), and a later page failing
+        keeps the rows already read and records it in `self.last_browse_error`.
         """
+        self.last_browse_error = None
         expected_slug = None
         params = []
         if iso3:
@@ -735,9 +737,19 @@ class DTMClient:
             try:
                 rows = self._parse_catalogue_rows(self._portal_get(url))
             except Exception as e:
-                print('  DTM catalogue: {}'.format(str(e)[:90]))
+                if page == 0:
+                    raise_unavailable('DTM catalogue', e)
+                # Later page: keep what was read, but say the walk was cut short.
+                self.last_browse_error = 'page {}: {}'.format(page, str(e)[:90])
+                print('  DTM catalogue: stopped at {}'.format(self.last_browse_error))
                 break
             if not rows:
+                if page == 0 and expected_slug and not search:
+                    # Every mapped country has a facet because it has datasets.
+                    raise ValueError(
+                        'DTM catalogue: 0 rows parsed on the first page for {}. The '
+                        'page layout or the facet id changed; this is not an '
+                        'absence of datasets.'.format(iso3))
                 break
             fresh = [r for r in rows if r['slug'] not in seen]
             for r in fresh:
@@ -809,31 +821,43 @@ class DTMClient:
             url, default_name = row_or_url, 'dtm_download'
         if not url:
             raise DatasetGated('no download URL on this row')
+        # The URL comes from scraped HTML: http(s) only (a file:// value would copy
+        # a local file), a size cap, and an atomic write, as in download_catalogue.
+        if not str(url).lower().startswith(('http://', 'https://')):
+            raise ValueError('refused scheme (only http/https): {}'.format(str(url)[:80]))
 
+        opener = safe_opener()
         req = Request(url, headers=dict(PORTAL_HEADERS, Referer=self.portal_base + '/datasets'))
         try:
-            resp = urlopen(req, timeout=180)
-            blob = resp.read()
+            resp = opener.open(req, timeout=180)
         except Exception as e:
             if '403' not in str(e):
-                raise
+                raise_unavailable('DTM download', e)
             time.sleep(2)
-            resp = urlopen(Request(url), timeout=180)
-            blob = resp.read()
+            resp = opener.open(Request(url), timeout=180)
+        blob = resp.read(MAX_DOWNLOAD_BYTES + 1)
+        if len(blob) > MAX_DOWNLOAD_BYTES:
+            raise ValueError('{} exceeds the {:,} B cap'.format(url[:70], MAX_DOWNLOAD_BYTES))
+        declared = resp.headers.get('Content-Length')
+        if declared and declared.isdigit() and len(blob) != int(declared):
+            raise SourceUnavailable('DTM download truncated: {:,} of {:,} bytes'.format(
+                len(blob), int(declared)))
 
         if not filename:
             cd = resp.headers.get('content-disposition') or ''
             m = re.search(r'filename="?([^";]+)', cd)
             filename = m.group(1).strip() if m else default_name + '.xlsx'
+        filename = safe_filename(filename)
         # Post-condition: a Drupal error page is HTML, HTTP 200, and would be saved
         # as a silently corrupt ".xlsx" without this check.
         if blob[:2] != b'PK' and blob[:5] != b'%PDF-' and b'<html' in blob[:600].lower():
             raise ValueError('{} returned an HTML page, not a file ({} bytes)'
                              .format(url[:70], len(blob)))
         os.makedirs(dest_dir, exist_ok=True)
-        path = os.path.join(dest_dir, re.sub(r'[<>:"/\\|?*]', '_', filename))
-        with open(path, 'wb') as fh:
+        path = os.path.join(dest_dir, filename)
+        with open(path + '.part', 'wb') as fh:
             fh.write(blob)
+        os.replace(path + '.part', path)
         print('  DTM: {} ({:,} bytes)'.format(os.path.basename(path), len(blob)))
         return path
 
@@ -862,8 +886,7 @@ class DTMClient:
         try:
             html = self._portal_get(url)
         except Exception as e:
-            print('  DTM portal: {}'.format(e))
-            return {'datasets': [], 'total_pages': 0}
+            raise_unavailable('DTM portal', e)
 
         # Extract dataset links — DTM uses Drupal, links are in /datasets/{slug}
         datasets = []
@@ -908,6 +931,11 @@ class DTMClient:
         Returns list of dataset dicts.
         """
         country_id = PORTAL_COUNTRY_IDS.get(iso3.upper())
+        if not country_id:
+            # Without a facet the search is full text across ALL countries, and its
+            # hits were then reported as this country's MSNA datasets.
+            raise UnmappedCountry('{}: no DTM catalogue facet; refusing an unscoped '
+                                  'MSNA search.'.format(iso3.upper()))
         all_datasets = []
 
         for page in range(max_pages):
@@ -956,7 +984,8 @@ class DTMClient:
                     'dataset_name': ds['name'],
                     'dataset_title': ds['title'],
                     'org': ds.get('org', ''),
-                    'date': ds.get('date', ''),
+                    # renamed from `date` by the P0 fix; the old key was always empty
+                    'metadata_modified': ds.get('metadata_modified', ''),
                     'resource_name': res.get('name', ''),
                     'resource_format': res.get('format', ''),
                     'resource_url': res.get('url', ''),

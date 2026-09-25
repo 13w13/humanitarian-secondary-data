@@ -21,10 +21,12 @@ Usage:
     poverty = hapi.get_poverty_rate('ETH')
 """
 import sys
-sys.stdout.reconfigure(encoding='utf-8')
+if hasattr(sys.stdout, 'reconfigure'):   # absent in Jupyter, IDLE, captured output
+    sys.stdout.reconfigure(encoding='utf-8')
 
 import json
 import time
+from urllib.parse import quote, urlencode
 from urllib.request import Request, urlopen
 
 from config import (
@@ -112,8 +114,10 @@ class HAPIClient:
     def _get(self, endpoint, params='', limit=None):
         """GET request to HAPI with app_identifier."""
         limit = limit or DEFAULT_PAGE_SIZE
-        url = '{}/{}?app_identifier={}&{}&limit={}'.format(
-            self.base, endpoint, self.app_id, params, limit)
+        # app_identifier encoded like any value (it is base64: "+", "/" and "="
+        # are not safe in a query string as-is).
+        url = '{}/{}?{}&{}&limit={}'.format(
+            self.base, endpoint, urlencode({'app_identifier': self.app_id}), params, limit)
         req = Request(url, headers={'User-Agent': USER_AGENT})
         return json.loads(urlopen(req, timeout=DEFAULT_TIMEOUT).read())
 
@@ -127,7 +131,7 @@ class HAPIClient:
         all_data = []
         offset = 0
         while True:
-            params = '{}={}&offset={}'.format(loc_param, location_code, offset)
+            params = '{}={}&offset={}'.format(loc_param, quote(str(location_code)), offset)
             if extra_params:
                 params += '&' + extra_params
             resp = self._get(endpoint, params)
@@ -137,6 +141,16 @@ class HAPIClient:
                 break
             offset += DEFAULT_PAGE_SIZE
             time.sleep(RATE_LIMIT_DELAY)
+        # Post-condition (rule 5): HAPI silently ignores an unknown parameter and
+        # then answers for EVERY country (see get_returnees). Rows that carry the
+        # location field must all be the country asked for.
+        want = str(location_code).upper()
+        stray = sorted({str(r.get(loc_param)).upper() for r in all_data
+                        if r.get(loc_param) and str(r.get(loc_param)).upper() != want})
+        if stray:
+            raise ValueError('HAPI {}: asked {}={} but rows came back for {}: the '
+                             'filter did not apply'.format(endpoint, loc_param, want,
+                                                           stray[:5]))
         return all_data
 
     # ── Data Availability (always call first) ──────────────
@@ -165,8 +179,8 @@ class HAPIClient:
                 'location_code': r.get('location_code', ''),
                 'admin1_name': r.get('admin1_name', ''),
                 'admin2_name': r.get('admin2_name', ''),
-                'date_start': str(r.get('reference_period_start', ''))[:10],
-                'date_end': str(r.get('reference_period_end', ''))[:10],
+                'date_start': str(r.get('reference_period_start') or '')[:10],
+                'date_end': str(r.get('reference_period_end') or '')[:10],
                 'population': r.get('population', ''),
             })
         return records
@@ -179,7 +193,7 @@ class HAPIClient:
         Each record has: org_acronym, org_name, sector_name,
         admin1_name, admin2_name, date_start, date_end.
         """
-        extra = 'org_acronym={}'.format(org_acronym) if org_acronym else ''
+        extra = 'org_acronym={}'.format(quote(org_acronym)) if org_acronym else ''
         raw = self._fetch_all('coordination-context/operational-presence', iso3, extra)
         records = []
         for r in raw:
@@ -189,8 +203,8 @@ class HAPIClient:
                 'sector_name': r.get('sector_name', ''),
                 'admin1_name': r.get('admin1_name', ''),
                 'admin2_name': r.get('admin2_name', ''),
-                'date_start': str(r.get('reference_period_start', ''))[:10],
-                'date_end': str(r.get('reference_period_end', ''))[:10],
+                'date_start': str(r.get('reference_period_start') or '')[:10],
+                'date_end': str(r.get('reference_period_end') or '')[:10],
             })
         return records
 
@@ -211,7 +225,7 @@ class HAPIClient:
                 'appeal_name': r.get('appeal_name', ''),
                 'appeal_code': r.get('appeal_code', ''),
                 'appeal_type': r.get('appeal_type', ''),
-                'year': str(r.get('reference_period_start', ''))[:4],
+                'year': str(r.get('reference_period_start') or '')[:4],
                 'requirements_usd': req_usd,
                 'funding_usd': fund_usd,
                 'funding_pct': round(fund_usd / req_usd * 100, 1) if req_usd else 0,
@@ -237,8 +251,8 @@ class HAPIClient:
                 'hazard_exposure': r.get('hazard_exposure_risk', ''),
                 'vulnerability': r.get('vulnerability_risk', ''),
                 'coping_capacity': r.get('coping_capacity_risk', ''),
-                'date_start': str(r.get('reference_period_start', ''))[:10],
-                'date_end': str(r.get('reference_period_end', ''))[:10],
+                'date_start': str(r.get('reference_period_start') or '')[:10],
+                'date_end': str(r.get('reference_period_end') or '')[:10],
             })
         return records
 
@@ -277,8 +291,8 @@ class HAPIClient:
                 'min_age': r.get('min_age', ''),
                 'max_age': r.get('max_age', ''),
                 'population': r.get('population', ''),
-                'date_start': str(r.get('reference_period_start', ''))[:10],
-                'date_end': str(r.get('reference_period_end', ''))[:10],
+                'date_start': str(r.get('reference_period_start') or '')[:10],
+                'date_end': str(r.get('reference_period_end') or '')[:10],
                 'resource_hdx_id': r.get('resource_hdx_id', ''),
             })
         return records
@@ -304,8 +318,8 @@ class HAPIClient:
                 'gender': r.get('gender', ''),
                 'age_range': r.get('age_range', ''),
                 'population': r.get('population', ''),
-                'date_start': str(r.get('reference_period_start', ''))[:10],
-                'date_end': str(r.get('reference_period_end', ''))[:10],
+                'date_start': str(r.get('reference_period_start') or '')[:10],
+                'date_end': str(r.get('reference_period_end') or '')[:10],
             })
         return records
 
@@ -326,8 +340,8 @@ class HAPIClient:
                 'event_type': r.get('event_type', ''),
                 'events': r.get('events', 0),
                 'fatalities': r.get('fatalities', 0),
-                'date_start': str(r.get('reference_period_start', ''))[:10],
-                'date_end': str(r.get('reference_period_end', ''))[:10],
+                'date_start': str(r.get('reference_period_start') or '')[:10],
+                'date_end': str(r.get('reference_period_end') or '')[:10],
             })
         return records
 
@@ -350,8 +364,8 @@ class HAPIClient:
                 'ipc_type': r.get('ipc_type', ''),
                 'population_in_phase': r.get('population_in_phase', ''),
                 'population_fraction': r.get('population_fraction_in_phase', ''),
-                'date_start': str(r.get('reference_period_start', ''))[:10],
-                'date_end': str(r.get('reference_period_end', ''))[:10],
+                'date_start': str(r.get('reference_period_start') or '')[:10],
+                'date_end': str(r.get('reference_period_end') or '')[:10],
             })
         return records
 
@@ -377,7 +391,7 @@ class HAPIClient:
                 'price_type': r.get('price_type', ''),
                 'lat': r.get('lat', ''),
                 'lon': r.get('lon', ''),
-                'date_start': str(r.get('reference_period_start', ''))[:10],
+                'date_start': str(r.get('reference_period_start') or '')[:10],
             })
         return records
 
@@ -400,8 +414,8 @@ class HAPIClient:
                 'intensity_of_deprivation': r.get('intensity_of_deprivation', ''),
                 'vulnerable_to_poverty': r.get('vulnerable_to_poverty', ''),
                 'in_severe_poverty': r.get('in_severe_poverty', ''),
-                'date_start': str(r.get('reference_period_start', ''))[:10],
-                'date_end': str(r.get('reference_period_end', ''))[:10],
+                'date_start': str(r.get('reference_period_start') or '')[:10],
+                'date_end': str(r.get('reference_period_end') or '')[:10],
             })
         return records
 
@@ -423,7 +437,7 @@ class HAPIClient:
                 'gender': r.get('gender', ''),
                 'age_range': r.get('age_range', ''),
                 'population': r.get('population', ''),
-                'date_start': str(r.get('reference_period_start', ''))[:10],
+                'date_start': str(r.get('reference_period_start') or '')[:10],
             })
         return records
 
@@ -444,8 +458,8 @@ class HAPIClient:
                 'rainfall': r.get('rainfall', ''),
                 'rainfall_anomaly_pct': r.get('rainfall_anomaly_pct', ''),
                 'rainfall_long_term_avg': r.get('rainfall_long_term_average', ''),
-                'date_start': str(r.get('reference_period_start', ''))[:10],
-                'date_end': str(r.get('reference_period_end', ''))[:10],
+                'date_start': str(r.get('reference_period_start') or '')[:10],
+                'date_end': str(r.get('reference_period_end') or '')[:10],
             })
         return records
 
@@ -509,8 +523,8 @@ class HAPIClient:
                 'category': r.get('category', ''),
                 'population_status': r.get('population_status', ''),
                 'population': r.get('population', ''),
-                'date_start': str(r.get('reference_period_start', ''))[:10],
-                'date_end': str(r.get('reference_period_end', ''))[:10],
+                'date_start': str(r.get('reference_period_start') or '')[:10],
+                'date_end': str(r.get('reference_period_end') or '')[:10],
                 'resource_hdx_id': r.get('resource_hdx_id', ''),
             })
         return records
@@ -558,7 +572,7 @@ class HAPIClient:
         """
         params = ''
         if name:
-            params += 'name={}&'.format(name)
+            params += 'name={}&'.format(quote(name))
         if has_hrp is not None:
             params += 'has_hrp={}&'.format('true' if has_hrp else 'false')
         raw = self._fetch_all_generic('metadata/location', params.rstrip('&'))

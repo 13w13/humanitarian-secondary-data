@@ -24,7 +24,8 @@ Usage :
 import sys
 import os
 
-sys.stdout.reconfigure(encoding='utf-8')
+if hasattr(sys.stdout, 'reconfigure'):   # absent in Jupyter, IDLE, captured output
+    sys.stdout.reconfigure(encoding='utf-8')
 HERE = os.path.dirname(os.path.abspath(__file__))
 sys.path.insert(0, HERE)
 
@@ -36,6 +37,22 @@ def _num(v):
         return 0.0
 
 
+def _unavailable(source, method, exc):
+    """Le contrat recette quand la source n'a pas repondu : valeur None, raison dite.
+
+    Une panne n'est pas « aucune donnee ». Avant, get_funding repondait « aucun
+    plan HPC pour SDN » quand l'API etait simplement injoignable. Seule une panne
+    passe par ici : un bug (4xx, schema change) leve, pour etre vu.
+    """
+    from config import is_outage
+    if not is_outage(exc):
+        raise exc
+    return {'value': None, 'vintage': None, 'source': source,
+            'caveats': ['{} injoignable : une PANNE, pas une absence de donnee '
+                        '({})'.format(source, str(exc)[:90])],
+            'method': method}
+
+
 # ─────────────────────────── BESOINS ───────────────────────────
 def get_pin(iso3):
     """People in Need national, dernier millesime, SANS somme.
@@ -45,7 +62,10 @@ def get_pin(iso3):
     choisit UNE etiquette et verifie que le compte vaut 1.
     """
     from hapi_client import HAPIClient, national_total
-    hn = HAPIClient().get_humanitarian_needs(iso3)
+    try:
+        hn = HAPIClient().get_humanitarian_needs(iso3)
+    except Exception as e:
+        return _unavailable('HDX HAPI humanitarian-needs', 'get_humanitarian_needs', e)
     if not hn:
         return {'value': None, 'vintage': None, 'source': 'HDX HAPI humanitarian-needs',
                 'caveats': ['aucune donnee HNO pour ' + iso3],
@@ -75,7 +95,10 @@ def get_disability_pin(iso3, admin_level='2'):
     quelques unites par arrondi).
     """
     from hapi_client import HAPIClient
-    hn = HAPIClient().get_humanitarian_needs(iso3)
+    try:
+        hn = HAPIClient().get_humanitarian_needs(iso3)
+    except Exception as e:
+        return _unavailable('HDX HAPI humanitarian-needs', 'get_humanitarian_needs', e)
     dis = [r for r in hn
            if 'disab' in str(r.get('category', '')).lower()
            and str(r.get('population_status', '')) == 'INN'
@@ -127,6 +150,7 @@ def get_food_insecurity(iso3):
     except Exception as e:
         out['caveats'].append('HAPI food-security: ' + str(e)[:60])
     # 2. WFP IPC global : la projection, avec son perimetre
+    failed = bool(out['caveats'])
     try:
         from wfp_client import WFPClient
         w = WFPClient().get_ipc(iso3)
@@ -142,10 +166,15 @@ def get_food_insecurity(iso3):
                 'que le courant : ne PAS la servir comme le chiffre national'.format(
                     r['ipc3plus_population'] or 0, r['analysed_population_implied'] or 0,
                     r['reference_period']))
-    except Exception:
-        pass
+    except Exception as e:
+        # Etait `pass` : la projection disparaissait sans que la reponse le dise.
+        failed = True
+        out['caveats'].append('WFP IPC global: ' + str(e)[:60])
     if out['value'] is None and 'projection' not in out:
-        out['caveats'].append('aucune donnee IPC exploitable pour ' + iso3)
+        out['caveats'].append(
+            'aucune donnee IPC obtenue pour {} : source(s) injoignable(s), ce n\'est '
+            'PAS une absence d\'insecurite alimentaire'.format(iso3) if failed
+            else 'aucune donnee IPC exploitable pour ' + iso3)
     return out
 
 
@@ -157,7 +186,10 @@ def get_funding(iso3, year=None):
     endpoint fts/flow?planId= separe (jamais la somme des flux, qui double-compte).
     """
     from hpc_client import HPCClient
-    plans = HPCClient().get_plans(iso3, max_funded=3)
+    try:
+        plans = HPCClient().get_plans(iso3, max_funded=3)
+    except Exception as e:
+        return _unavailable('HPC/FTS', 'get_plans', e)
     if not plans:
         return {'value': None, 'vintage': None, 'source': 'HPC/FTS',
                 'caveats': ['aucun plan HPC pour ' + iso3], 'method': 'get_plans'}
@@ -185,17 +217,11 @@ def get_conflict(iso3, days=30):
     `country_where='='` (sinon LIKE joker : Sudan ramene le Soudan du Sud). Assertion
     mono-pays dans le client. ACLED prend un NOM de pays, pas un ISO3.
     """
-    from acled_client import ACLEDClient
+    from acled_client import ACLEDClient, ACLED_COUNTRY_NAMES
     from datetime import datetime, timedelta
-    # ACLED prend un NOM de pays, pas un ISO3. Table locale (les noms canoniques
-    # ACLED, ex. "Democratic Republic of Congo" sans "the").
-    names = {'SDN': 'Sudan', 'SSD': 'South Sudan', 'LBN': 'Lebanon', 'SYR': 'Syria',
-             'YEM': 'Yemen', 'COD': 'Democratic Republic of Congo', 'AFG': 'Afghanistan',
-             'UKR': 'Ukraine', 'MLI': 'Mali', 'NGA': 'Nigeria', 'ETH': 'Ethiopia',
-             'SOM': 'Somalia', 'IRQ': 'Iraq', 'PSE': 'Palestine', 'MOZ': 'Mozambique',
-             'HTI': 'Haiti', 'TCD': 'Chad', 'NER': 'Niger', 'BDI': 'Burundi',
-             'MMR': 'Myanmar', 'PAK': 'Pakistan', 'KEN': 'Kenya', 'LBY': 'Libya'}
-    name = names.get(iso3.upper())
+    # ACLED prend un NOM de pays, pas un ISO3 : table partagee avec le pipeline
+    # (les noms canoniques ACLED, ex. "Democratic Republic of Congo" sans "the").
+    name = ACLED_COUNTRY_NAMES.get(iso3.upper())
     if not name:
         return {'value': None, 'vintage': None, 'source': 'ACLED',
                 'caveats': ['nom de pays ACLED inconnu pour ' + iso3], 'method': ''}
@@ -217,22 +243,34 @@ def get_conflict(iso3, days=30):
 
 # ─────────────────────────── SEVERITE ───────────────────────────
 def get_severity(iso3):
-    """Score de severite : INFORM (via HAPI/JRC) + ACAPS.
+    """Score de severite INFORM Severity, tel que publie par ACAPS.
 
     ⚠ Le champ ACAPS `People in need` est un SCORE 0-10, pas un effectif.
+    ⚠ C'est une ANALYSE (ACAPS estime), pas une mesure : epistemic_status le dit.
     """
-    out = {'value': {}, 'vintage': None, 'source': 'INFORM + ACAPS',
+    out = {'value': {}, 'vintage': None, 'source': 'ACAPS (INFORM Severity Index)',
+           'epistemic_status': 'analysis',
            'caveats': ['le champ ACAPS "People in need" est un score 0-10, pas un '
-                       'effectif'], 'method': ''}
+                       'effectif'], 'method': 'get_inform_severity, premiere crise listee'}
     try:
         from acaps_client import ACAPSClient
         rows = ACAPSClient().get_inform_severity(iso3)
         if rows:
             r = rows[0]
             out['value']['acaps'] = {'score': r.get('severity_score'),
-                                     'class': r.get('severity_class')}
+                                     'class': r.get('severity_class'),
+                                     'crisis': r.get('crisis_name')}
+            out['vintage'] = r.get('last_updated') or None
+            if len(rows) > 1:
+                # Plusieurs crises (dont regionales) : la premiere n'est pas forcement
+                # le niveau pays. Le dire plutot que le choisir en silence.
+                out['caveats'].append('{} crises ACAPS pour {} : score de la premiere '
+                                      'listee ({}), verifier le niveau pays'.format(
+                                          len(rows), iso3, r.get('crisis_name')))
+        else:
+            out['caveats'].append('aucune ligne ACAPS pour ' + iso3)
     except Exception as e:
-        out['caveats'].append('ACAPS: ' + str(e)[:50])
+        out['caveats'].append('ACAPS: ' + str(e)[:80])
     return out
 
 
@@ -240,10 +278,20 @@ def get_severity(iso3):
 def get_3w(iso3, sector=None):
     """Presence operationnelle (qui fait quoi ou), via HAPI op-presence."""
     from hapi_client import HAPIClient
-    ops = HAPIClient().get_op_presence(iso3)
+    try:
+        ops = HAPIClient().get_op_presence(iso3)
+    except Exception as e:
+        return _unavailable('HDX HAPI operational-presence (3W)', 'op-presence', e)
     if sector:
         ops = [r for r in ops if sector.lower() in str(r.get('sector_name', '')).lower()]
     from collections import Counter
+    if not ops:
+        return {'value': None, 'vintage': None,
+                'source': 'HDX HAPI operational-presence (3W)',
+                'caveats': ['aucune ligne 3W pour {}{}'.format(
+                    iso3, ' (secteur {!r} : verifier l\'orthographe)'.format(sector)
+                    if sector else '')],
+                'method': 'op-presence' + (' filtre secteur ' + sector if sector else '')}
     orgs = Counter(r.get('org_acronym') for r in ops if r.get('org_acronym'))
     sectors = Counter(r.get('sector_name') for r in ops if r.get('sector_name'))
     return {'value': {'rows': len(ops), 'n_orgs': len(orgs),
@@ -271,11 +319,14 @@ def neglect_index(iso3):
                       'funding_vintage': fund['vintage'],
                       'signal': ('besoin eleve + sous-finance' if pin['value'] and
                                  cov is not None and cov < 50 else 'a interpreter')},
-            'vintage': '{} / {}'.format(pin['vintage'], fund['vintage']),
+            'vintage': ('{} / {}'.format(pin['vintage'], fund['vintage'])
+                        if pin['vintage'] or fund['vintage'] else None),
             'source': 'HAPI (PiN) x HPC (financement)',
+            # les reserves des deux composantes voyagent avec l'indice
             'caveats': ['indice COMPOSITE : millesimes differents entre PiN et '
                         'financement, ne pas surinterpreter',
-                        'un RRP multi-pays fausse la couverture pays'],
+                        'un RRP multi-pays fausse la couverture pays']
+                       + pin.get('caveats', [])[:2] + fund.get('caveats', [])[:2],
             'method': 'get_pin x get_funding.coverage_pct'}
 
 

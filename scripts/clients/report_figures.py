@@ -33,14 +33,15 @@ Usage :
     print(d['freshness'])                       # ce que dit chaque couche, et sa date
 """
 import sys
-sys.stdout.reconfigure(encoding='utf-8')
+if hasattr(sys.stdout, 'reconfigure'):   # absent in Jupyter, IDLE, captured output
+    sys.stdout.reconfigure(encoding='utf-8')
 
 import json
 import os
 import re
 from urllib.request import Request, urlopen
 
-from config import DEFAULT_TIMEOUT, USER_AGENT
+from config import DEFAULT_TIMEOUT, USER_AGENT, MAX_DOWNLOAD_BYTES
 
 RELIEFWEB_REPORTS = 'https://api.reliefweb.int/v2/reports'
 
@@ -90,21 +91,24 @@ _YEARISH = re.compile(r'^(19|20)\d{2}$')
 
 def _appname():
     """appname ReliefWeb pré-approuvé. Depuis 2025-11-01 un appname libre est 403."""
-    try:
-        import keyring
-        a = keyring.get_password('sds.reliefweb', 'appname')
-        if a:
-            return a
-    except Exception:
-        pass
-    return os.environ.get('RELIEFWEB_APPNAME', 'humanitarian-secondary-data')
+    from config import get_credential
+    return (get_credential('sds.reliefweb', 'appname', 'RELIEFWEB_APPNAME')
+            or 'humanitarian-secondary-data')
 
 
 def _post(payload):
-    req = Request('{}?appname={}'.format(RELIEFWEB_REPORTS, _appname()),
+    from urllib.error import HTTPError
+    from urllib.parse import urlencode
+    from config import MissingCredential, RELIEFWEB_APPNAME_HELP
+    req = Request('{}?{}'.format(RELIEFWEB_REPORTS, urlencode({'appname': _appname()})),
                   data=json.dumps(payload).encode('utf-8'),
                   headers={'Content-Type': 'application/json', 'User-Agent': USER_AGENT})
-    return json.loads(urlopen(req, timeout=DEFAULT_TIMEOUT + 15).read())
+    try:
+        return json.loads(urlopen(req, timeout=DEFAULT_TIMEOUT + 15).read())
+    except HTTPError as e:
+        if e.code == 403:   # an unapproved appname: configuration, not an outage
+            raise MissingCredential(RELIEFWEB_APPNAME_HELP) from e
+        raise
 
 
 def _dedup_key(report):
@@ -142,6 +146,9 @@ def latest_reports(iso3, topic=None, query=None, source=None, limit=6,
     Retourne une liste de dicts : title, date, url, files, body, dedup_key,
     plus `duplicates` (les entrées écartées, pour traçabilité).
     """
+    if topic and topic not in TOPICS:
+        # An unknown topic used to query ReliefWeb with no filter at all.
+        raise ValueError('unknown topic {!r}: one of {}'.format(topic, ', '.join(TOPICS)))
     spec = TOPICS.get(topic or '', {})
     source = source or spec.get('rw_source')
     query = query or spec.get('rw_query')
@@ -166,8 +173,11 @@ def latest_reports(iso3, topic=None, query=None, source=None, limit=6,
     try:
         resp = _post(payload)
     except Exception as e:
+        # `error` travels with the empty list: without it, an unreachable ReliefWeb
+        # read downstream as "no published figure found".
         print('  ReliefWeb: {}'.format(str(e)[:100]))
-        return {'reports': [], 'duplicates': [], 'off_topic': [], 'total': 0}
+        return {'reports': [], 'duplicates': [], 'off_topic': [], 'total': 0,
+                'error': '{}: {}'.format(type(e).__name__, str(e)[:260])}
 
     kept, dups, off_topic, seen = [], [], [], set()
     for entry in resp.get('data', []):
@@ -226,8 +236,34 @@ def _iso_list(val):
     return out
 
 
+# Longer names that CONTAIN the country's name but designate somewhere else. They
+# are blanked before any name test: `\bSudan\b` matched "South Sudan", so a South
+# Sudan DTM figure came out citable for SDN, and "Mount Lebanon" (a governorate)
+# passed for Lebanon as a whole.
+_CONFUSABLE = {
+    'SDN': [r'South\s+Sudan(?:ese)?'],
+    'LBN': [r'(?:Mount|South|North|Mont)[\s-]+Lebanon', r'Mount[\s-]+Liban'],
+    'COD': [r'(?<!Democratic )Republic\s+of\s+(?:the\s+)?Congo', r'Congo[\s-]+Brazzaville'],
+    'GIN': [r'Guinea[\s-]+Bissau', r'Equatorial\s+Guinea', r'Papua\s+New\s+Guinea'],
+    'NER': [],
+}
+# Aliases that name PART of the country: fine to find a relevant report, never
+# proof of national scope ("1,900,000 ... across Gaza" is not oPt as a whole).
+_SUBNATIONAL_ALIASES = {'PSE': {'gaza', 'west bank'}}
+
+
+def _strip_confusables(text, iso3):
+    """(text with confusable names blanked, True if one was found)."""
+    hit = False
+    for pat in _CONFUSABLE.get((iso3 or '').upper(), []):
+        text, n = re.subn(pat, ' ', text or '', flags=re.I)
+        hit = hit or bool(n)
+    return text, hit
+
+
 def _names_country(text, iso3):
     """Le texte nomme-t-il le pays ? (alias + libellé officiel DTM)"""
+    text, _ = _strip_confusables(text, iso3)
     names = list(_ALIASES.get((iso3 or '').upper(), []))
     lab = DTM_LABELS.get((iso3 or '').upper())
     if lab:
@@ -261,38 +297,85 @@ def report_text(report, cache_dir=None):
                 'pages': None, 'bytes': 0}
 
     url, name = pdfs[0].get('url'), str(pdfs[0].get('filename', 'report.pdf'))
-    path = None
-    if cache_dir:
-        os.makedirs(cache_dir, exist_ok=True)
-        path = os.path.join(cache_dir, re.sub(r'[<>:"/\\|?*]', '_', name)[:110])
-    try:
-        if path and os.path.exists(path):
-            blob = open(path, 'rb').read()
-        else:
-            blob = urlopen(Request(url, headers={'User-Agent': USER_AGENT}),
-                           timeout=180).read()
-            if blob[:5] != b'%PDF-':
-                return {'text': '', 'origin': 'pièce jointe non PDF ({} o)'.format(len(blob)),
-                        'url': report.get('url', ''), 'pages': None, 'bytes': len(blob)}
-            if path:
-                open(path, 'wb').write(blob)
-    except Exception as e:
-        return {'text': '', 'origin': 'échec téléchargement PDF: {}'.format(str(e)[:70]),
-                'url': report.get('url', ''), 'pages': None, 'bytes': 0}
+    if not str(url or '').lower().startswith(('http://', 'https://')):
+        # The URL comes from the API response: never open file:// or other schemes.
+        return {'text': '', 'origin': 'URL de pièce jointe refusée ({})'.format(
+                    str(url)[:40]), 'url': report.get('url', ''), 'pages': None, 'bytes': 0}
+    blob = _cached_pdf(url, name, cache_dir)
+    if isinstance(blob, str):                   # an explanation, not bytes
+        return {'text': '', 'origin': blob, 'url': report.get('url', ''),
+                'pages': None, 'bytes': 0}
 
-    try:
-        import fitz
-    except ImportError:
+    fitz = _pymupdf()
+    if fitz is None:
         return {'text': '', 'origin': 'PDF présent mais PyMuPDF (fitz) absent: '
                                       'pip install pymupdf',
                 'url': report.get('url', ''), 'pages': None, 'bytes': len(blob)}
     import io
-    doc = fitz.open(stream=io.BytesIO(blob), filetype='pdf')
-    txt = '\n'.join(p.get_text() for p in doc)
-    pages = doc.page_count
-    doc.close()
+    try:
+        doc = fitz.open(stream=io.BytesIO(blob), filetype='pdf')
+        txt = '\n'.join(p.get_text() for p in doc)
+        pages = doc.page_count
+        doc.close()
+    except Exception as e:  # noqa: BLE001 - one bad PDF must not sink the dossier
+        # A corrupt or encrypted PDF used to raise out of latest_figures and lose
+        # every other report's figures with it.
+        return {'text': '', 'origin': 'PDF illisible ({}: {})'.format(
+                    type(e).__name__, str(e)[:50]),
+                'url': report.get('url', ''), 'pages': None, 'bytes': len(blob)}
     return {'text': txt, 'origin': 'PDF ({} pages)'.format(pages),
             'url': (pdfs[0].get('url') or ''), 'pages': pages, 'bytes': len(blob)}
+
+
+def _pymupdf():
+    """The PyMuPDF module, or None. `import pymupdf` first: recent releases warn
+    that the historical `fitz` name is deprecated and will be removed."""
+    try:
+        import pymupdf
+        return pymupdf
+    except ImportError:
+        pass
+    try:
+        import fitz
+        return fitz
+    except ImportError:
+        return None
+
+
+def _cached_pdf(url, name, cache_dir):
+    """PDF bytes for `url`, from the cache or the network; a str explains a failure.
+
+    The cache is keyed on a hash of the URL. It used to be keyed on the remote
+    FILENAME, so a newer report whose attachment had the same name returned the
+    old PDF's text under the new date and URL. Writes are atomic, and a cached
+    file that is not a PDF is fetched again rather than trusted.
+    """
+    import hashlib
+    path = None
+    if cache_dir:
+        os.makedirs(cache_dir, exist_ok=True)
+        stem = re.sub(r'[^A-Za-z0-9._-]+', '_', os.path.splitext(name)[0])[:60]
+        path = os.path.join(cache_dir, '{}_{}.pdf'.format(
+            hashlib.sha256(url.encode('utf-8')).hexdigest()[:16], stem))
+        if os.path.exists(path):
+            with open(path, 'rb') as fh:
+                blob = fh.read()
+            if blob[:5] == b'%PDF-':
+                return blob
+    try:
+        blob = urlopen(Request(url, headers={'User-Agent': USER_AGENT}),
+                       timeout=180).read(MAX_DOWNLOAD_BYTES + 1)
+    except Exception as e:  # noqa: BLE001 - reported as the report's origin
+        return 'échec téléchargement PDF: {}'.format(str(e)[:70])
+    if len(blob) > MAX_DOWNLOAD_BYTES:
+        return 'PDF au-delà du plafond de {:,} o'.format(MAX_DOWNLOAD_BYTES)
+    if blob[:5] != b'%PDF-':
+        return 'pièce jointe non PDF ({} o)'.format(len(blob))
+    if path:
+        with open(path + '.part', 'wb') as fh:
+            fh.write(blob)
+        os.replace(path + '.part', path)
+    return blob
 
 
 # Marqueurs de PORTÉE PARTIELLE. Une phrase qui en porte un ne décrit pas un total
@@ -303,14 +386,19 @@ def report_text(report, cache_dir=None):
 _SUBSET_GEO = re.compile(
     r'\b(region|regions|governorate|governorates|district|districts|town|towns|'
     r'village|villages|camp|camps|locality|localities|province|provinces|county|'
-    r'counties|neighbourhood|sub-?district|from locations across the|state of)\b', re.I)
+    r'counties|neighbourhood|sub-?district|from locations across the|state|states|'
+    r'city|cities|municipality|municipalities|oblast|oblasts|raion|raions|'
+    r'commune|communes|site|sites|settlement|settlements|shelter|shelters)\b', re.I)
 # Portée nationale explicite (hors nom de pays, testé séparément).
 _SCOPE_NATIONAL = re.compile(
     r'\b(nationwide|countrywide|country-?wide|across the country|nationally|'
     r'at the national level|in the country)\b', re.I)
 # Références au passé : « prior to », « pre-crisis », un millésime nettement antérieur.
+# `prior` and `before the` alone were too wide: "a nine per cent decrease from the
+# prior week" is the CURRENT figure and was being thrown out.
 _HISTORICAL = re.compile(
-    r'\b(prior to|prior|before the|pre-?(crisis|conflict|war|2\d{3})|'
+    r'\b(prior to|before the (?:war|conflict|crisis|escalation|outbreak|fighting|onset)|'
+    r'pre-?(crisis|conflict|war|2\d{3})|'
     r'previously|formerly|used to|baseline of|as of \d{1,2} \w+ 20(1\d|2[0-3]))\b', re.I)
 
 try:                                   # libellés pays officiels, pour le test de portée
@@ -370,11 +458,20 @@ def figure_sentences(text, min_value=1000, limit=25, iso3=None, country_label=No
         persons (IDPs) across Lebanon, representing a nine per cent decrease
         compared to 15 July. »
     """
-    names = list(_ALIASES.get((iso3 or '').upper(), []))
+    sub_aliases = _SUBNATIONAL_ALIASES.get((iso3 or '').upper(), set())
+    names = [n for n in _ALIASES.get((iso3 or '').upper(), [])
+             if n.lower() not in sub_aliases]
     if country_label:
         names.append(country_label)
-    name_re = (re.compile(r'\b({})\b'.format('|'.join(re.escape(n) for n in names)), re.I)
-               if names else None)
+    name_group = '|'.join(re.escape(n) for n in names)
+    name_re = re.compile(r'\b({})\b'.format(name_group), re.I) if names else None
+    # "north-west Syria", "eastern DRC": a part of the country, not the country.
+    part_re = (re.compile(r'\b(northern|southern|eastern|western|central|'
+                          r'north-?east(?:ern)?|north-?west(?:ern)?|'
+                          r'south-?east(?:ern)?|south-?west(?:ern)?)\s+(?:{})\b'
+                          .format(name_group), re.I) if names else None)
+    sub_re = (re.compile(r'\b({})\b'.format('|'.join(re.escape(a) for a in sub_aliases)),
+                         re.I) if sub_aliases else None)
 
     chunks = []
     for line in _join_wrapped(text).split('\n'):
@@ -400,11 +497,19 @@ def figure_sentences(text, min_value=1000, limit=25, iso3=None, country_label=No
             continue
         seen.add(key)
 
-        is_subset = bool(_SUBSET_GEO.search(c))
-        names_country = bool(name_re.search(c)) if name_re else False
+        plain, confusable = _strip_confusables(
+            re.sub(r'\bState of Palestine\b', 'Palestine', c, flags=re.I), iso3)
+        is_subset = bool(_SUBSET_GEO.search(plain)
+                         or (part_re and part_re.search(plain))
+                         or (sub_re and sub_re.search(plain)))
+        names_country = bool(name_re.search(plain)) if name_re else False
         if is_subset:
             scope = 'subset'
-        elif _SCOPE_NATIONAL.search(c) or names_country:
+        elif confusable:
+            # Names a governorate or a neighbouring country ("Mount Lebanon", "South
+            # Sudan"), with or without the country itself: never a national total.
+            scope = 'unclear' if names_country else 'subset'
+        elif _SCOPE_NATIONAL.search(plain) or names_country:
             scope = 'national'
         else:
             scope = 'unclear'
@@ -421,8 +526,8 @@ def figure_sentences(text, min_value=1000, limit=25, iso3=None, country_label=No
         # of IDPs reached a peak in January 2025, with an estimated 11,585,384 IDPs »
         # arrivait en tête, devant les 8 685 273 de fin juin 2026.
         superlative = bool(re.search(
-            r'\b(peak|peaked|highest[- ]?ever|record high|all[- ]time|maximum|'
-            r'at its highest)\b', c, re.I))
+            r'\b(peak|peaked|highest|record|record high|all[- ]time|maximum|'
+            r'unprecedented)\b', c, re.I))
         has_date = bool(re.search(
             r'\b(as of|as at|between|during|since|\d{1,2}\s+\w+\s+20\d\d)\b', c, re.I))
         has_verb = bool(re.search(
@@ -471,9 +576,8 @@ def render_report_pages(report, out_dir, pages=(0, 1), zoom=2.0, cache_dir=None)
             or str(x.get('filename', '')).lower().endswith('.pdf')]
     if not pdfs:
         return []
-    try:
-        import fitz
-    except ImportError:
+    fitz = _pymupdf()
+    if fitz is None:
         print('  PyMuPDF (fitz) absent : pip install pymupdf')
         return []
     import io
@@ -656,6 +760,17 @@ def analytical_findings(iso3, source='ACAPS', topic='acaps', cache_dir=None,
     return out
 
 
+def _change_value(sentence, default):
+    """The CHANGE in "decreased by 120,233 to 8,685,273": the number after "by".
+
+    The largest number of the sentence is usually the new STOCK, and taking it as
+    the change removed every correct "by X to Y" sentence from citable.
+    """
+    m = re.search(r'\bby\s+(?:some\s+|about\s+|around\s+)?(\d{1,3}(?:,\d{3})+|\d+)',
+                  sentence, re.I)
+    return int(m.group(1).replace(',', '')) if m else default
+
+
 def latest_figures(iso3, topic='dtm', cache_dir=None, max_reports=3,
                    render_dir=None):
     """Dossier « dernier chiffre » : ce que dit chaque couche, et de quand ça date.
@@ -670,7 +785,10 @@ def latest_figures(iso3, topic='dtm', cache_dir=None, max_reports=3,
     URL. Un chiffre sans sa phrase ne doit pas sortir d'ici.
     """
     iso3 = iso3.upper()
-    spec = TOPICS.get(topic, TOPICS['dtm'])
+    if topic not in TOPICS:
+        # was labelled as DTM whatever the typo ("unhrc")
+        raise ValueError('unknown topic {!r}: one of {}'.format(topic, ', '.join(TOPICS)))
+    spec = TOPICS[topic]
     # `citable` ne contient QUE des phrases de portée nationale, non historiques et
     # non tronquées. Tout le reste va dans `other_sentences` : utile pour du détail
     # local, jamais présentable comme un total.
@@ -687,6 +805,11 @@ def latest_figures(iso3, topic='dtm', cache_dir=None, max_reports=3,
         'latest_title': rw['reports'][0]['title'] if rw['reports'] else None,
         'duplicates_dropped': len(rw['duplicates']),
     }
+    if rw.get('error'):
+        dossier['freshness']['D_publication']['error'] = rw['error']
+        dossier['caveats'].append(
+            'ReliefWeb indisponible ({}) : aucun rapport n\'a pu etre lu. Ce n\'est '
+            'pas une absence de chiffre publie.'.format(rw['error'][:160]))
     if rw['duplicates']:
         dossier['caveats'].append(
             '{} rapport(s) doublon écarté(s) : ReliefWeb réindexe les versions '
@@ -852,7 +975,8 @@ def latest_figures(iso3, topic='dtm', cache_dir=None, max_reports=3,
             elif re.search(r'\b(decreas\w*|increas\w*|declin\w*|dropp?\w*|rose|fell|'
                            r'grew|reduc\w*|chang\w*|more|fewer|less)\b.{0,40}?\bby\b|'
                            r'\bby\b.{0,20}?\b(decreas|increas)', c['sentence'], re.I) \
-                    and top > ref * 0.25:
+                    and _change_value(c['sentence'], top) > ref * 0.25:
+                top = _change_value(c['sentence'], top)
                 c['magnitude_flag'] = (
                     'variation invraisemblable : {:,} annoncés comme un changement '
                     'alors que le stock de référence est {:,} (soit {:.0f} % du '
@@ -897,7 +1021,9 @@ def latest_figures(iso3, topic='dtm', cache_dir=None, max_reports=3,
             'produit avec TOUS les pays qu\'il mentionne (une requête PSE ramenait '
             '« DTM Montenegro: Migration Data and Routes »).'
             .format(len(rw['off_topic']), iso3))
-    if not dossier['citable'] and not dossier['visual_read']:
+    if rw.get('error'):
+        pass    # already said above: nothing was searched, so nothing was "not found"
+    elif not dossier['citable'] and not dossier['visual_read']:
         dossier['caveats'].append(
             'Aucune phrase chiffrée extraite : dire « pas de chiffre publié trouvé '
             'par ce chemin », jamais un nombre approché.')

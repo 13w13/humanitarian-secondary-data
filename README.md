@@ -25,7 +25,12 @@ cd humanitarian-secondary-data
 python -X utf8 scripts/explore.py LBN
 ```
 
-No API key, no `pip install`, nothing written to disk. In about 7 seconds you get:
+Nothing written to disk, and no API key for sections 1, 2 and 4. Section 3, the
+cited figure, reads published reports through ReliefWeb, which since November 2025
+only answers a **pre-approved appname** (free, [request it here](https://apidoc.reliefweb.int/parameters#appname),
+then `export RELIEFWEB_APPNAME=...`), and reads their PDFs with `pymupdf`. Without
+them, section 3 says the report layer is unavailable instead of inventing an absence.
+In about 10 seconds you get (the console prints this in French; translated here):
 
 ```
 1. WHAT EXISTS          60 DTM datasets, 0 downloadable, 60 gated
@@ -49,21 +54,40 @@ Try `SDN` (data is open, 8.7M IDPs cited from a 35-page PDF) or `PSE` (no DTM co
 ```bash
 python -X utf8 scripts/health_check.py SDN         # are the 17 sources reachable?
 python -X utf8 scripts/fetch_country_data.py SDN   # pull everything to CSV
-python -X utf8 scripts/run_tests.py hard           # 31 assertions, offline, instant
-python -X utf8 scripts/run_tests.py                # 87 assertions, no pytest needed
+python -X utf8 scripts/run_tests.py hard           # 71 assertions, offline, ~2 s
+python -X utf8 scripts/run_tests.py                # hard + dtm + p0, no pytest needed
 python -X utf8 scripts/run_tests.py skill50        # 50 end-to-end scenarios (~4 min)
 ```
 
-Start with `hard`: it makes no network request, so it runs in under a second, and if
-it fails the problem is ours. The other suites call the real APIs, so they are slow
-and they depend on other people's uptime. A provider outage or a missing optional key
-reports as SKIP; FAIL is reserved for something that is actually our fault. If you
-see FAIL, it is a real finding.
+Start with `hard`: it makes no request outside the machine, so it runs in a couple of
+seconds, and if it fails the problem is ours. It includes a full pipeline run with the
+network cut off, which must report every source as unavailable or skipped, never as
+zero. The other suites call the real APIs, so they are slow and they depend on other
+people's uptime. A provider outage or a missing optional key reports as SKIP; FAIL is
+reserved for something that is actually our fault. If you see FAIL, it is a real
+finding. `skill50` also counts the verdicts that are declared rather than executed.
+
+### What a fetch tells you
+
+Every source ends a run in one status, written to `{ISO3}_data/fetch_summary.csv`:
+
+| Status | Meaning |
+|---|---|
+| `ok` / `empty` | the source answered, with data / with nothing for this country and period |
+| `partial` | some requests answered, others failed: the files are not a total |
+| `unavailable` | the provider could not be reached: retry later |
+| `error` | our side (a bug, or the provider changed its response): report it |
+| `skipped` | not queried: a free key is missing, or a `--skip-*` flag |
+| `not_covered` | the source has no coverage for this country |
+
+A failed source is never written as zero records. The run exits 0 when every source
+answered, 1 when one is partial, unavailable or in error, and 2 on invalid arguments,
+so a shell loop, a CI step or an agent can tell a complete run from an incomplete one.
 
 ### Requirements
 
-Python 3.8+. **Fetching data needs nothing but the standard library**, so the quick
-start above runs on a locked-down machine with no `pip install` and no API key.
+Python 3.8+. **Fetching data needs nothing but the standard library**, so the toolkit
+runs on a locked-down machine with no `pip install`.
 
 Four features reach beyond the standard library. Each imports its dependency only
 when you call it, so a missing package disables that one feature and nothing else,
@@ -71,7 +95,7 @@ and it says so rather than raising a traceback.
 
 | Feature | Needs | Without it |
 |---|---|---|
-| Store keys in the OS keychain | `keyring` | Keys are read from environment variables instead |
+| Store keys in the OS keychain | `keyring` | Keys are read from environment variables instead (also when the keychain backend is broken) |
 | Read a downloaded workbook | `openpyxl` | Fetching and cataloguing still work |
 | Read a report PDF | `pymupdf` | Report body text is used when available |
 | Draw a chart | `matplotlib` | Figures are still returned as text |
@@ -80,10 +104,12 @@ and it says so rather than raising a traceback.
 pip install keyring openpyxl pymupdf matplotlib    # only if you want all four
 ```
 
-Some sources need a free key (ACLED, ACAPS, IDMC, DTM API). Set it in the keychain
-under service `sds.{provider}`, or export the matching environment variable
-(`ACLED_EMAIL`, `ACAPS_API_KEY`, `IDMC_CLIENT_ID`, `DTM_SUBSCRIPTION_KEY`). Nothing
-is read from a command-line argument, so no secret lands in your shell history.
+Some sources need a free key: ReliefWeb (a pre-approved appname), ACLED, ACAPS, IDMC
+and the DTM API. Set it in the keychain under service `sds.{provider}`, or export the
+matching environment variable: `RELIEFWEB_APPNAME`, `ACLED_EMAIL` + `ACLED_PASSWORD`,
+`ACAPS_API_KEY`, `IDMC_CLIENT_ID`, `DTM_SUBSCRIPTION_KEY` (and optionally
+`HDX_API_KEY`). Without one, that source reports `skipped`, not zero. Nothing is read
+from a command-line argument, so no secret lands in your shell history.
 
 ## Parameters
 
@@ -92,7 +118,7 @@ The first argument is an **ISO 3166-1 alpha-3 country code** (e.g. `SDN`, `UKR`,
 | Source | Country coverage |
 |--------|-----------------|
 | **IMPACT/REACH** | Any country with REACH operations (~50 countries) |
-| **Liveuamap** | 80 ISO3 codes mapped to 106 subdomains, see [`references/liveuamap_iso3_mapping.csv`](references/liveuamap_iso3_mapping.csv) |
+| **Liveuamap** | 78 ISO3 codes on 73 feeds, see [`references/liveuamap_iso3_mapping.csv`](references/liveuamap_iso3_mapping.csv). Regional feeds (Sahel, Central Africa, Africa, Latin America) and South Sudan's use of the Sudan feed carry no country field, so they are refused by default (`not_covered`) |
 | **ACLED** | All countries with recorded conflict events |
 | **HDX HAPI** | All countries in the Humanitarian Data Exchange |
 | **HDX CKAN** | Any country with datasets on HDX |
@@ -108,7 +134,10 @@ The first argument is an **ISO 3166-1 alpha-3 country code** (e.g. `SDN`, `UKR`,
 | **DTM/IOM** | Countries with displacement tracking |
 | **ReliefWeb** | Any country with reports filed |
 
-If a source has no data for the given country, it returns zero records and moves on.
+If a source has no data for the given country, its status says which case it is:
+`empty` (it answered with nothing), `not_covered` (it has no coverage for this
+country), or `unavailable` (it could not be reached). It never answers with a silent
+zero.
 
 ## Filters
 
@@ -116,11 +145,15 @@ If a source has no data for the given country, it returns zero records and moves
 |------|-------------|---------|
 | `ISO3` | Country code (required first argument) | `SDN`, `UKR`, `SYR` |
 | `--only` | Sources to query (comma-separated) | `--only impact,liveuamap` |
-| `--date-from` | Start date (YYYY-MM-DD) | `--date-from 2025-01-01` |
-| `--date-to` | End date (YYYY-MM-DD) | `--date-to 2025-12-31` |
-| `--max-pages` | Pagination depth for Liveuamap (default 200) | `--max-pages 50` |
-| `--skip-acled` | Skip sources that need API keys | |
+| `--date-from` | Start date (YYYY-MM-DD, validated) | `--date-from 2025-01-01` |
+| `--date-to` | End date (YYYY-MM-DD, validated) | `--date-to 2025-12-31` |
+| `--max-pages` | Pagination depth for Liveuamap (default 200); a window cut short is reported `partial` | `--max-pages 50` |
+| `--skip-acled` (and `--skip-hdx`, `--skip-acaps`, ...) | Skip that one source; cannot be combined with `--only` | |
 | `--output-dir` | Override output directory | |
+
+Each source applies the period its own way (HPC reads the year of `--date-from`,
+GDACS looks back from today, and HDX, INFORM, WFP, World Bank, ACAPS, DTM, IFRC and
+IMPACT ignore it); the help text of `fetch_country_data.py` lists which ones use it.
 
 ```bash
 # All sources for Sudan
@@ -169,7 +202,8 @@ USE_CASES.md                       # four reader profiles, walked through a real
 SECURITY.md                        # credentials, downloaded content, personal data
 
 {ISO3}_data/                       # output (created automatically, one per country)
-├── data_inventory.csv             # index of everything fetched
+├── fetch_summary.csv              # one row per source: status, records, note
+├── data_inventory.csv             # one row per file on disk, and who wrote it
 ├── raw/                           # API results + downloaded datasets
 └── catalogue/                     # dataset listings with download URLs
 ```
@@ -179,7 +213,7 @@ SECURITY.md                        # credentials, downloaded content, personal d
 | Source | Data | Auth |
 |--------|------|------|
 | IMPACT/REACH | MSNA datasets, reports, maps (21,000+ resources) | Public |
-| Liveuamap | Conflict events with coordinates, 106 regions | Public |
+| Liveuamap | Conflict events with coordinates, 73 feeds (scraped) | Public |
 | ACLED | Conflict events, CAST 6-month forecasts | OAuth2 (free) |
 | HDX HAPI | IDPs, food security, refugees, humanitarian needs, disability | app_id (free) |
 | HDX CKAN | 27,000+ datasets | Public |
@@ -190,7 +224,7 @@ SECURITY.md                        # credentials, downloaded content, personal d
 | ACAPS | Crisis severity, access constraints, analytical products | API key (free) |
 | HPC/FTS | Funding flows, response plans | Public |
 | IFRC Go | Emergencies, appeals, field reports | Public |
-| ReliefWeb | Report listings, situation reports, full report text | appname (free) |
+| ReliefWeb | Report listings, situation reports, full report text | Pre-approved appname (free, required since Nov 2025) |
 | World Bank | Development indicators | Public |
 | GDACS | Disaster alerts | Public |
 | DTM/IOM | Displacement tracking: v3 API, catalogue (2,375 datasets), data files | Public |
@@ -217,7 +251,7 @@ keychain, and `.env` is gitignored.
 
 One motivation behind this project: making the disability data gap measurable.
 
-Humanitarian data systems rarely include disability as a disaggregation variable. Of the 17 sources we query, only one (HDX HAPI's `humanitarian-needs` endpoint) provides a structured `disabled_marker` field. And even that endpoint returns zero records for some countries.
+Humanitarian data systems rarely include disability as a disaggregation variable. Of the 17 sources we query, only two carry it at all: HDX HAPI's `humanitarian-needs` endpoint gives counts of people in need with a disability (a `category` value, not a dedicated field, in HAPI v2), and ACAPS qualifies incidents. Even HAPI returns no disability row for some countries.
 
 This is not because persons with disabilities are absent from these crises. It is because data systems do not systematically collect this information. That gap matters for advocacy.
 

@@ -23,17 +23,18 @@ country subdomains. The client uses adaptive delay + retry with backoff
 to handle this. If scraping UKR, use --date-from to limit depth.
 """
 import sys
-sys.stdout.reconfigure(encoding='utf-8')
+if hasattr(sys.stdout, 'reconfigure'):   # absent in Jupyter, IDLE, captured output
+    sys.stdout.reconfigure(encoding='utf-8')
 
 import base64
 import json
 import re
 import time as time_mod
-from datetime import datetime
+from datetime import datetime, timezone
 from urllib.request import Request, urlopen
 from urllib.error import URLError, HTTPError
 
-from config import DEFAULT_TIMEOUT, save_csv
+from config import save_csv, NotCovered, raise_unavailable
 
 # --- Constants -----------------------------------------------------------
 
@@ -98,7 +99,9 @@ EVENT_TYPES = {
     # --- Political / social ---
     14: 'political_statement',  # speech (4082)
     22: 'protest',              # rally (321)
-    51: 'election',             # elect (18)
+    # icon 'elect' = electricity, not elections: every sample row is a grid,
+    # substation or blackout event (was mislabelled 'election' until 2026-09).
+    51: 'power_infrastructure',  # elect (18)
     12: 'law_enforcement',      # police (210)
     73: 'arrest',               # arrested (161)
     23: 'hostage',              # hostage (14)
@@ -170,6 +173,28 @@ ISO3_TO_SUBDOMAIN = {
     'VNM': 'vietnam', 'ZWE': 'zimbabwe', 'GUY': 'guyana',
 }
 
+# Feeds that are not one country's own. Their events carry no country field, so
+# rows from them cannot be attributed to the requested country: `get_events`
+# refuses them unless the caller opts in with allow_regional=True.
+REGIONAL_FEEDS = {'sahel', 'centralafrica', 'africa', 'latam'}
+BINATIONAL_FEEDS = {'israelpalestine': ('ISR', 'PSE'), 'koreas': ('KOR', 'PRK')}
+BORROWED_FEEDS = {'SSD': 'sudan'}      # South Sudan read from Sudan's feed
+
+
+def feed_scope(iso3):
+    """'dedicated', 'binational', 'regional', 'borrowed', or None if unmapped."""
+    sub = ISO3_TO_SUBDOMAIN.get(iso3)
+    if sub is None:
+        return None
+    if sub in REGIONAL_FEEDS:
+        return 'regional'
+    if sub in BINATIONAL_FEEDS:
+        return 'binational'
+    if iso3 in BORROWED_FEEDS:
+        return 'borrowed'
+    return 'dedicated'
+
+
 # Thematic/regional subdomains (not mapped to ISO3, use directly)
 # 'africa', 'asia', 'baltics', 'caribbean', 'caucasus', 'centralasia',
 # 'centralafrica', 'indochina', 'latam', 'northeurope', 'pacific',
@@ -191,6 +216,10 @@ class LiveuamapClient:
 
     def __init__(self):
         self.session_cookies = {}
+        # What the last get_events() call could NOT say through its return value:
+        # whether pagination stopped on errors (a truncated list is not a count),
+        # and how old the feed's newest event is (a frozen feed is not calm).
+        self.last_meta = {}
 
     def _get(self, url, headers=None, timeout=None):
         """GET request, returns (status, body_str).
@@ -236,7 +265,8 @@ class LiveuamapClient:
         except (json.JSONDecodeError, ValueError):
             return None
 
-    def get_events(self, iso3, max_pages=None, date_from=None, date_to=None):
+    def get_events(self, iso3, max_pages=None, date_from=None, date_to=None,
+                   allow_regional=False):
         """Fetch all available events for a country.
 
         Args:
@@ -246,30 +276,49 @@ class LiveuamapClient:
             date_to: Optional YYYY-MM-DD - filter events after this date
 
         Returns:
-            List of flat event dicts ready for CSV.
+            List of flat event dicts ready for CSV. See `self.last_meta` for
+            truncation and staleness, which a list cannot carry.
+
+        Raises NotCovered when no Liveuamap region maps to the country,
+        SourceUnavailable when the first page cannot be reached, and ValueError
+        when the page no longer carries the data block (the site changed): none
+        of these is "0 events".
         """
+        self.last_meta = {'subdomain': None, 'pages': 0, 'stopped_on_errors': False,
+                          'newest_event': None, 'stale_days': None}
         subdomain = ISO3_TO_SUBDOMAIN.get(iso3)
         if not subdomain:
-            print('  Liveuamap: no mapping for {}'.format(iso3))
-            return []
+            raise NotCovered('Liveuamap has no region mapped to {} (see '
+                             'references/liveuamap_iso3_mapping.csv).'.format(iso3))
+        scope = feed_scope(iso3)
+        if scope in ('regional', 'borrowed') and not allow_regional:
+            # A Sahel feed for Mali is mostly not Mali, and nothing in a row says
+            # which country it is about: returning it as MLI broke rule 5.
+            raise NotCovered(
+                'Liveuamap has no feed of its own for {}: "{}" is a {} feed that also '
+                'covers other countries, and its events carry no country field. '
+                'Pass allow_regional=True to fetch it knowingly.'.format(
+                    iso3, subdomain, scope))
+        self.last_meta['subdomain'] = subdomain
+        self.last_meta['feed_scope'] = scope
 
         if max_pages is None:
             max_pages = LIVEUAMAP_MAX_PAGES
 
+        # A malformed date used to be ignored, so a typo silently fetched the whole
+        # feed with no date filter at all.
+        # Dates are read and written in UTC: local time moved events across
+        # midnight, and the same run gave different days on different machines.
         date_from_ts = None
         if date_from:
-            try:
-                date_from_ts = int(datetime.strptime(date_from, '%Y-%m-%d').timestamp())
-            except ValueError:
-                pass
+            date_from_ts = int(datetime.strptime(date_from, '%Y-%m-%d')
+                               .replace(tzinfo=timezone.utc).timestamp())
 
         date_to_ts = None
         if date_to:
-            try:
-                # End of day
-                date_to_ts = int(datetime.strptime(date_to, '%Y-%m-%d').timestamp()) + 86399
-            except ValueError:
-                pass
+            # End of day
+            date_to_ts = int(datetime.strptime(date_to, '%Y-%m-%d')
+                             .replace(tzinfo=timezone.utc).timestamp()) + 86399
 
         base = self._base_url(subdomain)
         self.session_cookies = {}  # fresh session per region
@@ -278,18 +327,19 @@ class LiveuamapClient:
         # --- Page 1: HTML + base64 ---
         try:
             status, html = self._get(base + '/')
-        except (URLError, HTTPError) as e:
-            print('  Liveuamap {}: {}'.format(subdomain, e))
-            return []
+        except Exception as e:
+            raise_unavailable('Liveuamap {}'.format(subdomain), e)
 
         if status != 200:
-            print('  Liveuamap {}: HTTP {}'.format(subdomain, status))
-            return []
+            raise ValueError('Liveuamap {}: unexpected HTTP {} on the first page'
+                             .format(subdomain, status))
 
         data = self._decode_ovens(html)
         if not data:
-            print('  Liveuamap {}: no ovens data'.format(subdomain))
-            return []
+            raise ValueError(
+                'Liveuamap {}: no "ovens" data block in the page. The site layout '
+                'changed and the scraper needs updating; this is not an absence '
+                'of events.'.format(subdomain))
 
         all_venues = list(data.get('venues', []))
         seen_ids = {v['id'] for v in all_venues if 'id' in v}
@@ -359,6 +409,7 @@ class LiveuamapClient:
                           '(collected {} events so far)'.format(
                               subdomain, consecutive_errors, len(all_venues)),
                           flush=True)
+                    self.last_meta['stopped_on_errors'] = True
                     break
                 # Increase delay after errors
                 delay = min(delay * 1.5, 10.0)
@@ -398,7 +449,7 @@ class LiveuamapClient:
                 last_dt = ''
                 if last_ts:
                     try:
-                        last_dt = datetime.fromtimestamp(last_ts).strftime('%Y-%m-%d')
+                        last_dt = datetime.fromtimestamp(last_ts, timezone.utc).strftime('%Y-%m-%d')
                     except (ValueError, OSError):
                         pass
                 print('  Liveuamap {}: page {}/{} | {} events | oldest {} | {:.0f}s elapsed ~{:.0f}s remaining'.format(
@@ -418,6 +469,8 @@ class LiveuamapClient:
             cat_id = v.get('cat_id')
             records.append({
                 'event_id': v.get('id'),
+                'feed': subdomain,
+                'feed_scope': scope,
                 'datetime': _ts_to_iso(ts),
                 'event_type': EVENT_TYPES.get(cat_id, 'other'),
                 'cat_id': cat_id,
@@ -440,8 +493,21 @@ class LiveuamapClient:
         # Warn when the NEWEST event of the whole feed (pre-date-filter) is old,
         # so an empty period-filtered result reads as "feed dead", not "quiet".
         newest_ts = max((v.get('timestamp', 0) or 0 for v in all_venues), default=0)
+        self.last_meta['pages'] = page
+        # The crawl walks back from today. Stopping at max_pages before reaching
+        # date_from used to return a short (or empty) window as if it were complete.
+        oldest_ts = min((v.get('timestamp') or 0 for v in all_venues
+                         if v.get('timestamp')), default=0)
+        if (date_from_ts and oldest_ts and oldest_ts > date_from_ts
+                and page >= max_pages and globaltime != 0):
+            self.last_meta['truncated_before'] = _ts_to_iso(oldest_ts)[:10]
+            print('  Liveuamap {}: max_pages={} reached at {} before --date-from {}: '
+                  'the period is only partly covered'.format(
+                      subdomain, max_pages, _ts_to_iso(oldest_ts)[:10], date_from))
         if newest_ts:
             age_days = (time_mod.time() - newest_ts) / 86400
+            self.last_meta['newest_event'] = _ts_to_iso(newest_ts)[:10]
+            self.last_meta['stale_days'] = round(age_days) if age_days > 14 else None
             if age_days > 14:
                 print('  Liveuamap {}: WARNING - feed appears STALE: newest event is '
                       '{} ({:.0f} days old). Source-side freeze likely; do not '
@@ -458,7 +524,7 @@ def _ts_to_iso(ts):
     if not ts:
         return ''
     try:
-        return datetime.fromtimestamp(ts).isoformat()
+        return datetime.fromtimestamp(ts, timezone.utc).isoformat()
     except (ValueError, OSError, OverflowError):
         return ''
 

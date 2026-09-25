@@ -11,13 +11,18 @@ premier quand on doute d'une modification.
 Elle couvre les correctifs de robustesse du 2026-07-30, et surtout elle contient une
 assertion STATIQUE (test 5) qui empeche la regression de la cause racine : un import
 optionnel non protege, qui transforme un extra manquant en traceback.
+
+Les tests 7 et 8 (2026-09-25) couvrent l'autre cause racine : une panne lue comme une
+absence. Le test 8 coupe le reseau au niveau socket et fait tourner le pipeline
+complet : rien ne sort de la machine, et aucune source ne doit se dire `ok`.
 """
 import io
 import os
 import re
 import sys
 
-sys.stdout.reconfigure(encoding='utf-8')
+if hasattr(sys.stdout, 'reconfigure'):   # absent in Jupyter, IDLE, captured output
+    sys.stdout.reconfigure(encoding='utf-8')
 
 HERE = os.path.dirname(os.path.abspath(__file__))
 sys.path.insert(0, HERE)
@@ -197,11 +202,11 @@ def t_core_imports_bare():
         for m in mods:
             try:
                 mod = importlib.reload(importlib.import_module(m))
-            except ImportError as e:
-                broken.append('{} ({})'.format(m, str(e)[:40]))
+            except Exception as e:
+                # Toute erreur a l'import casse le client (SyntaxError, AttributeError
+                # sur sys.stdout.reconfigure...) : elle passait avant sans bruit.
+                broken.append('{} ({}: {})'.format(m, type(e).__name__, str(e)[:40]))
                 continue
-            except Exception:
-                continue      # une autre erreur n'est pas un probleme d'import
             # Importer NE SUFFIT PAS. La resolution des credentials vit dans les
             # __init__ : le 2026-07-30, un `from config import (...)` multi-ligne
             # oublie a fait passer l'import et casse le constructeur en NameError.
@@ -227,9 +232,213 @@ def t_core_imports_bare():
           not uninstantiable, '; '.join(uninstantiable[:3]))
 
 
+# ── 7 : une panne n'est jamais un zero ────────────────────────
+def t_outage_taxonomy():
+    section(7, 'is_outage : panne amont ou bug chez nous ?')
+    import socket
+    from urllib.error import HTTPError, URLError
+    from config import SourceUnavailable, MissingCredential, NotCovered, is_outage
+
+    def http(code):
+        return HTTPError('https://example.org', code, 'x', {}, None)
+    for exc, want, label in (
+            (URLError('Tunnel connection failed: 403 Forbidden'), True, 'proxy qui refuse'),
+            (socket.timeout('timed out'), True, 'timeout'),
+            (ConnectionResetError('reset'), True, 'connexion coupee'),
+            (http(503), True, 'HTTP 503'), (http(429), True, 'HTTP 429'),
+            (http(404), False, 'HTTP 404 = URL fausse, notre bug'),
+            (http(403), False, 'HTTP 403 du fournisseur = notre bug'),
+            (KeyError('flows'), False, 'KeyError = schema change'),
+            (SourceUnavailable('x'), True, 'SourceUnavailable'),
+            (MissingCredential('x'), False, 'cle absente = SKIP, pas une panne'),
+            (NotCovered('x'), False, 'pays non couvert')):
+        check(label, is_outage(exc) is want)
+    check('MissingCredential reste un ValueError (compatibilite)',
+          issubclass(MissingCredential, ValueError))
+    from gdacs_client import GDACSUnavailable
+    from dtm_client import UnmappedCountry, NoApiAccess
+    check('GDACSUnavailable est un SourceUnavailable',
+          issubclass(GDACSUnavailable, SourceUnavailable))
+    check('UnmappedCountry est un NotCovered', issubclass(UnmappedCountry, NotCovered))
+    check('NoApiAccess est un MissingCredential', issubclass(NoApiAccess, MissingCredential))
+
+
+def t_outage_is_never_zero():
+    section(8, 'panne reseau simulee : aucune source ne rend « 0 » (constat du 2026-09-24)')
+    # Le 2026-09-24, avec le reseau coupe, le pipeline sortait en succes, n'ecrivait
+    # aucun fichier, et affichait « 0 plans, 0 flows ($0 total 2026) », « Stock 0
+    # IDPs », « 0 conflict events » pour le Soudan. Ici on coupe le reseau au niveau
+    # socket (rien ne sort), on neutralise les attentes, et on exige qu'aucune
+    # source ne se declare `ok` ou `empty`.
+    import contextlib
+    import csv
+    import shutil
+    import socket
+    import tempfile
+    import time as time_mod
+
+    def refused(*a, **k):
+        raise ConnectionRefusedError('panne simulee par test_hardening')
+
+    real_conn, real_sleep, real_argv = socket.create_connection, time_mod.sleep, sys.argv
+    tmp = tempfile.mkdtemp(prefix='hsd_outage_')
+    socket.create_connection = refused
+    time_mod.sleep = lambda *a, **k: None
+    try:
+        import fetch_country_data as f
+        sys.argv = ['fetch_country_data.py', 'YEM', '--output-dir', tmp]
+        with contextlib.redirect_stdout(io.StringIO()):
+            code = f.main()
+        with open(os.path.join(tmp, 'fetch_summary.csv'), encoding='utf-8') as fh:
+            rows = list(csv.DictReader(fh))
+        import recipes
+        with contextlib.redirect_stdout(io.StringIO()):
+            fund = recipes.get_funding('SDN')
+            pin = recipes.get_pin('SDN')
+    finally:
+        socket.create_connection, time_mod.sleep, sys.argv = real_conn, real_sleep, real_argv
+        shutil.rmtree(tmp, ignore_errors=True)
+
+    check('code de sortie 1 (run incomplet)', code == 1, 'code {}'.format(code))
+    check('fetch_summary.csv : une ligne par source', len(rows) == len(f.ALL_SOURCES),
+          '{} lignes'.format(len(rows)))
+    liars = ['{}={}'.format(r['source'], r['status']) for r in rows
+             if r['status'] in ('ok', 'empty', 'partial')]
+    check('aucune source ok/empty/partial sans reseau', not liars, ', '.join(liars))
+    bugs = ['{}: {}'.format(r['source'], r['note'][:60]) for r in rows
+            if r['status'] == 'error']
+    check('une panne n\'est classee "error" nulle part', not bugs, '; '.join(bugs[:2]))
+    check('au moins une source "unavailable"',
+          any(r['status'] == 'unavailable' for r in rows))
+    check('recette financement : valeur None + PANNE dite',
+          fund['value'] is None and any('PANNE' in c for c in fund['caveats']),
+          (fund['caveats'] or [''])[0][:60])
+    check('recette PiN : valeur None + PANNE dite',
+          pin['value'] is None and any('PANNE' in c for c in pin['caveats']))
+
+
+def t_downloader_behaviour():
+    section(9, 'telechargeur, en vrai : serveur local (127.0.0.1, rien ne sort)')
+    # Les tests 4 lisent le code source ; ceux-ci le font tourner. Un serveur HTTP
+    # local sert des reponses piegees : corps tronque, page HTML a la place d'un
+    # xlsx, redirection vers ftp://, nom reel dans Content-Disposition.
+    import shutil
+    import tempfile
+    import threading
+    from http.server import BaseHTTPRequestHandler, HTTPServer
+    from download_catalogue import _download_file
+
+    class H(BaseHTTPRequestHandler):
+        def log_message(self, *a):
+            pass
+
+        def do_GET(self):
+            if self.path == '/short.xlsx':         # annonce 1000 o, en envoie 10
+                self.send_response(200)
+                self.send_header('Content-Length', '1000')
+                self.end_headers()
+                self.wfile.write(b'PK\x03\x04' + b'x' * 6)
+                self.wfile.flush()
+                self.close_connection = True
+            elif self.path == '/login.xlsx':       # page de login en HTTP 200
+                body = b'<!DOCTYPE html><html><body>Sign in</body></html>'
+                self.send_response(200)
+                self.send_header('Content-Length', str(len(body)))
+                self.end_headers()
+                self.wfile.write(body)
+            elif self.path == '/to-ftp.xlsx':      # 302 vers un autre schema
+                self.send_response(302)
+                self.send_header('Location', 'ftp://127.0.0.1/secret.csv')
+                self.send_header('Content-Length', '0')
+                self.end_headers()
+            elif self.path == '/track/100046':     # tracker DTM sans extension
+                body = b'%PDF-1.4 fake'
+                self.send_response(200)
+                self.send_header('Content-Disposition',
+                                 'attachment; filename="../SDN snapshot.pdf"')
+                self.send_header('Content-Length', str(len(body)))
+                self.end_headers()
+                self.wfile.write(body)
+            else:
+                self.send_response(404)
+                self.send_header('Content-Length', '0')
+                self.end_headers()
+
+    srv = HTTPServer(('127.0.0.1', 0), H)
+    port = srv.server_address[1]
+    threading.Thread(target=srv.serve_forever, daemon=True).start()
+    tmp = tempfile.mkdtemp(prefix='hsd_dl_')
+    base = 'http://127.0.0.1:{}'.format(port)
+    try:
+        ok, err = _download_file(base + '/short.xlsx', os.path.join(tmp, 'a.xlsx'))
+        check('corps tronque refuse', not ok and 'truncated' in str(err), str(err)[:60])
+        ok, err = _download_file(base + '/login.xlsx', os.path.join(tmp, 'b.xlsx'))
+        check('page HTML refusee comme xlsx', not ok and 'HTML' in str(err), str(err)[:60])
+        ok, err = _download_file(base + '/to-ftp.xlsx', os.path.join(tmp, 'c.xlsx'))
+        check('redirection vers ftp:// refusee', not ok and 'non-http' in str(err),
+              str(err)[:60])
+        ok, _ = _download_file(base + '/track/100046', os.path.join(tmp, '100046'))
+        names = sorted(os.listdir(tmp))
+        check('nom reel lu dans Content-Disposition, sans ../', ok and names ==
+              ['100046_SDN snapshot.pdf'], str(names))
+        check('aucun .part ni fichier partiel laisse',
+              not [n for n in names if n.endswith('.part') or n[0] in 'abc'])
+    finally:
+        srv.shutdown()
+        shutil.rmtree(tmp, ignore_errors=True)
+
+
+def t_golden_sentences():
+    section(10, 'resolveur : phrases de reference (portee, pays, historique, variation)')
+    # Chaque phrase est un cas reel ou un contre-exemple de la revue de 2026-09. Le
+    # classement se fait hors reseau : c'est la partie du toolkit qui decide ce qui
+    # est citable, elle doit etre testee a chaque modification.
+    from report_figures import figure_sentences, _names_country, _change_value
+
+    def one(text, iso3):
+        got = figure_sentences(text, iso3=iso3, report_year='2026')
+        return got[0] if got else {}
+
+    cases = [
+        ('LBN', 'As of 22 July 2026, IOM\'s DTM recorded 375,090 internally displaced '
+                'persons (IDPs) across Lebanon, representing a nine per cent decrease '
+                'compared to 15 July.', True, 'le titre de reference du README'),
+        ('LBN', 'As of 22 July 2026, DTM recorded 375,090 IDPs across Lebanon, a nine '
+                'per cent decrease from the prior week.', True, '"prior week" n\'est pas historique'),
+        ('SDN', 'As of 30 June 2026, DTM recorded 2,026,000 IDPs across South Sudan.',
+         False, 'Soudan du Sud n\'est pas le Soudan'),
+        ('LBN', 'DTM recorded 120,500 IDPs in Mount Lebanon.', False, 'Mont-Liban = gouvernorat'),
+        ('SDN', 'DTM identified 1,815,000 IDPs in South Darfur State, Sudan.', False,
+         'un Etat soudanais'),
+        ('SYR', 'An estimated 2,900,000 IDPs remain in north-west Syria.', False,
+         'nord-ouest = une partie du pays'),
+        ('COD', 'More than 5,700,000 people are displaced in eastern DRC.', False,
+         'est de la RDC'),
+        ('PSE', 'An estimated 1,900,000 people are displaced across Gaza.', False,
+         'Gaza = une partie du territoire'),
+        ('SDN', 'In January 2025, the number of IDPs in Sudan reached its highest level, '
+                'with 11,585,384 IDPs recorded.', False, 'un plus-haut n\'est pas le courant'),
+        ('COD', 'DTM estimated 6,200,000 IDPs across the Democratic Republic of the Congo.',
+         True, 'la RDC reste nationale'),
+    ]
+    for iso3, text, want, label in cases:
+        got = one(text, iso3)
+        check('{} {}'.format(iso3, label), bool(got.get('headline_ok')) is want,
+              'scope={} hist={} sup={}'.format(got.get('scope'), got.get('historical'),
+                                               got.get('superlative')))
+    check('rapport "South Sudan" hors sujet pour SDN',
+          not _names_country('DTM South Sudan: Mobility Update', 'SDN'))
+    check('"Sudan and South Sudan" nomme bien le Soudan',
+          _names_country('Sudan and South Sudan crisis', 'SDN'))
+    check('variation = le nombre apres "by"',
+          _change_value('decreased by 120,233 to 8,685,273 IDPs', 8685273) == 120233)
+
+
 def main():
     for fn in (t_iso3, t_credentials, t_require_module, t_downloader,
-               t_no_unguarded_optional_import, t_core_imports_bare):
+               t_no_unguarded_optional_import, t_core_imports_bare,
+               t_outage_taxonomy, t_outage_is_never_zero, t_downloader_behaviour,
+               t_golden_sentences):
         try:
             fn()
         except Exception as e:

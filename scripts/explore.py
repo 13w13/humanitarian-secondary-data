@@ -25,7 +25,8 @@ import sys
 import os
 import time
 
-sys.stdout.reconfigure(encoding='utf-8')
+if hasattr(sys.stdout, 'reconfigure'):   # absent in Jupyter, IDLE, captured output
+    sys.stdout.reconfigure(encoding='utf-8')
 HERE = os.path.dirname(os.path.abspath(__file__))
 sys.path.insert(0, os.path.join(HERE, 'clients'))
 
@@ -38,8 +39,6 @@ def hr(title):
 
 
 def explore(iso3, topic='dtm'):
-    from config import normalize_iso3
-    iso3 = normalize_iso3(iso3)
     t0 = time.time()
     print('EXPLORATION — {} (sujet : {})'.format(iso3, topic))
 
@@ -108,6 +107,15 @@ def explore(iso3, topic='dtm'):
             print('    [{}] {}'.format(v['as_of'], v['report'][:60]))
         print('  → rendre les pages en PNG et les lire (render_dir=...), ne PAS')
         print('    apparier automatiquement les nombres.')
+    elif dossier and dossier['freshness'].get('D_publication', {}).get('error'):
+        err = dossier['freshness']['D_publication']['error']
+        print('  Couche publication INDISPONIBLE : aucun rapport n\'a pu etre lu.')
+        if err.startswith('MissingCredential'):
+            print('  -> appname ReliefWeb non approuve : definir RELIEFWEB_APPNAME')
+            print('     (demande gratuite : https://apidoc.reliefweb.int/parameters#appname).')
+        else:
+            print('  -> panne ou erreur ({}) : reessayer plus tard.'.format(err[:60]))
+        print('  Ce n\'est PAS une absence de chiffre publie.')
     else:
         print('  Aucun chiffre publie trouve par ce chemin. Le dire tel quel :')
         print('  ne pas approcher un ordre de grandeur.')
@@ -134,18 +142,30 @@ def explore(iso3, topic='dtm'):
 
 
 def main(argv):
-    args = [a for a in argv if not a.startswith('--')]
-    topic = 'dtm'
-    for i, a in enumerate(argv):
-        if a == '--topic' and i + 1 < len(argv):
+    # The value after --topic is not a country: `explore.py --topic unhcr LBN`
+    # used to take "unhcr" as the ISO3.
+    args, topic, i = [], 'dtm', 0
+    while i < len(argv):
+        if argv[i] == '--topic' and i + 1 < len(argv):
             topic = argv[i + 1]
+            i += 2
+            continue
+        if not argv[i].startswith('--'):
+            args.append(argv[i])
+        i += 1
     if not args:
         print(__doc__)
         print('Pays disponibles pour le catalogue DTM : 56 (voir '
               'DTM_CATALOGUE_COUNTRIES).')
         print('Sujets : dtm (defaut), unhcr, ocha, acaps')
         return 1
-    explore(args[0], topic=topic)
+    from config import normalize_iso3
+    try:
+        iso3 = normalize_iso3(args[0])
+    except ValueError as e:
+        print(e)
+        return 2
+    explore(iso3, topic=topic)
     return 0
 
 
