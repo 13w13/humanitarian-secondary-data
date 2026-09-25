@@ -11,17 +11,17 @@ Usage:
     info = acaps.get_crisis_info('lebanon')
 """
 import sys
-sys.stdout.reconfigure(encoding='utf-8')
+if hasattr(sys.stdout, 'reconfigure'):   # absent in Jupyter, IDLE, captured output
+    sys.stdout.reconfigure(encoding='utf-8')
 
 import json
-import os
 import time
 from urllib.request import Request, urlopen
 from urllib.parse import urlencode
 
 from config import (
     ACAPS_BASE, DEFAULT_TIMEOUT, RATE_LIMIT_DELAY, USER_AGENT, save_csv,
-    get_credential
+    get_credential, MissingCredential, raise_unavailable
 )
 
 
@@ -40,16 +40,23 @@ class ACAPSClient:
             'sds.acaps', 'api_key', 'ACAPS_API_KEY')
 
     def _get(self, endpoint, params=None):
-        """GET request to ACAPS API."""
+        """GET request to ACAPS API.
+
+        Refuses to call without a key: an unauthenticated request came back
+        empty and read as "0 access constraints" rather than as "no key".
+        """
+        if not self.api_key:
+            raise MissingCredential(
+                'ACAPS requires a free API key: keyring sds.acaps/api_key or env '
+                'var ACAPS_API_KEY (register at https://api.acaps.org/).')
         url = '{}/{}'.format(self.base, endpoint)
         if params:
             url += '?{}'.format(urlencode(params, doseq=True))
         headers = {
             'User-Agent': USER_AGENT,
             'Accept': 'application/json',
+            'Authorization': 'Token {}'.format(self.api_key),
         }
-        if self.api_key:
-            headers['Authorization'] = 'Token {}'.format(self.api_key)
         req = Request(url, headers=headers)
         resp = json.loads(urlopen(req, timeout=DEFAULT_TIMEOUT).read())
         return resp
@@ -69,8 +76,10 @@ class ACAPSClient:
             try:
                 resp = self._get('crises/', params)
             except Exception as e:
-                print('  ACAPS crises: {}'.format(e))
-                break
+                # A failure mid-pagination used to `break` and return a truncated
+                # list as if it were complete.
+                raise_unavailable('ACAPS crises (page {})'.format(
+                    params.get('page', 1)), e)
             results = resp.get('results', resp) if isinstance(resp, dict) else resp
             if isinstance(results, list):
                 for c in results:
@@ -111,8 +120,7 @@ class ACAPSClient:
         try:
             resp = self._get('inform-severity-index/', params)
         except Exception as e:
-            print('  ACAPS inform-severity: {}'.format(e))
-            return []
+            raise_unavailable('ACAPS inform-severity', e)
         results = resp.get('results', resp) if isinstance(resp, dict) else resp
         if isinstance(results, list):
             for item in results:
@@ -153,8 +161,7 @@ class ACAPSClient:
         try:
             resp = self._get('humanitarian-access/', params)
         except Exception as e:
-            print('  ACAPS humanitarian-access unavailable: {}'.format(e))
-            return []
+            raise_unavailable('ACAPS humanitarian-access', e)
         results = resp.get('results', resp) if isinstance(resp, dict) else resp
         if isinstance(results, list):
             for item in results:
@@ -196,7 +203,8 @@ if __name__ == '__main__':
                 s['impact'], s['humanitarian_conditions'], s['complexity']))
 
     access = acaps.get_access_constraints(iso3)
-    print('\nAccess constraints: {}'.format(len(access)))
+    print('\nHumanitarian access rows: {}'.format(len(access)))
     for a in access[:5]:
-        print('  [{}] {} - {}'.format(
-            a['severity'], a['constraint_type'], a['description'][:80]))
+        print('  [ACCESS {}] {} (pillars {}/{}/{})'.format(
+            a['access_score'], a['crisis_name'][:60],
+            a['pillar1'], a['pillar2'], a['pillar3']))

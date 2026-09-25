@@ -11,13 +11,14 @@ Usage:
     plans = hpc.get_plans('SDN')
 """
 import sys
-sys.stdout.reconfigure(encoding='utf-8')
+if hasattr(sys.stdout, 'reconfigure'):   # absent in Jupyter, IDLE, captured output
+    sys.stdout.reconfigure(encoding='utf-8')
 
 import json
 from urllib.request import Request, urlopen
 from urllib.parse import urlencode
 
-from config import DEFAULT_TIMEOUT, USER_AGENT, save_csv
+from config import DEFAULT_TIMEOUT, USER_AGENT, save_csv, raise_unavailable
 
 HPC_BASE = 'https://api.hpc.tools/v1/public'
 
@@ -62,10 +63,13 @@ class HPCClient:
         try:
             data = self._get('fts/flow', params)
         except Exception as e:
-            print('  HPC flows: {}'.format(e))
-            return []
+            raise_unavailable('HPC flows', e)
+        return self._parse_flows(data)
 
-        flows_raw = data.get('data', {}).get('flows', [])
+    @staticmethod
+    def _parse_flows(data):
+        """Flow rows of an fts/flow answer (one page: `limit` rows at most)."""
+        flows_raw = (data.get('data') or {}).get('flows', [])
         records = []
         for f in flows_raw:
             # Source organizations
@@ -113,9 +117,14 @@ class HPCClient:
         except Exception as e:
             print('  HPC funding plan {}: {}'.format(plan_id, str(e)[:70]))
             return {}
-        inc = (data.get('data') or {}).get('incoming') or {}
+        inc = (data.get('data') or {}).get('incoming')
+        if not isinstance(inc, dict) or inc.get('fundingTotal') is None:
+            # No aggregate in the answer: funding unknown (None), never 0 %.
+            print('  HPC funding plan {}: no incoming aggregate in the response'
+                  .format(plan_id))
+            return {}
         return {
-            'funding_usd': inc.get('fundingTotal') or 0,
+            'funding_usd': inc.get('fundingTotal'),
             'pledges_usd': inc.get('pledgeTotal') or 0,
             'flow_count': inc.get('flowCount') or 0,
         }
@@ -145,8 +154,7 @@ class HPCClient:
         try:
             data = self._get('plan/country/{}'.format(iso3.upper()))
         except Exception as e:
-            print('  HPC plans: {}'.format(e))
-            return []
+            raise_unavailable('HPC plans', e)
 
         plans_raw = data.get('data', [])
         records = []
@@ -201,8 +209,7 @@ class HPCClient:
         try:
             data = self._get('emergency/country/{}'.format(iso3.upper()))
         except Exception as e:
-            print('  HPC emergencies: {}'.format(e))
-            return []
+            raise_unavailable('HPC emergencies', e)
 
         emergencies_raw = data.get('data', [])
         records = []
@@ -219,42 +226,45 @@ class HPCClient:
         return records
 
     def get_funding_summary(self, iso3, year=None):
-        """Get summarized funding for a country (total in/out).
+        """Funding received by a country: FTS's own aggregate, plus top donors.
 
-        Aggregates flows to provide top-level numbers.
-        Returns dict: total_funding, total_pledges, n_flows, top_donors, top_clusters.
+        The total is `data.incoming.fundingTotal`, computed by FTS. It used to be
+        the sum of ONE page of flows (truncated at 500, pledges included, a flow
+        counted once per boundary): the double count get_plan_funding warns about.
+        Top donors and clusters are ranked over the LISTED incoming flows only, an
+        indication rather than a complete breakdown.
+
+        Returns {} when FTS gives no aggregate (never a total of 0).
         """
-        flows = self.get_funding_flows(iso3, year=year, limit=500)
-        if not flows:
+        params = {'countryISO3': iso3.upper(), 'limit': '500'}
+        if year:
+            params['year'] = str(year)
+        try:
+            data = self._get('fts/flow', params)
+        except Exception as e:
+            raise_unavailable('HPC funding summary', e)
+        inc = (data.get('data') or {}).get('incoming')
+        if not isinstance(inc, dict) or inc.get('fundingTotal') is None:
             return {}
+        flows = [f for f in self._parse_flows(data)
+                 if f['boundary'] in ('incoming', '') and f['status'] != 'pledge']
 
-        total = sum(f['amount_usd'] for f in flows)
-        committed = [f for f in flows if f['status'] == 'commitment']
-        pledged = [f for f in flows if f['status'] == 'pledge']
-
-        # Top donors
-        donor_totals = {}
-        for f in flows:
-            if f['source_org']:
-                donor_totals[f['source_org']] = donor_totals.get(f['source_org'], 0) + f['amount_usd']
-        top_donors = sorted(donor_totals.items(), key=lambda x: x[1], reverse=True)[:10]
-
-        # Top clusters
-        cluster_totals = {}
-        for f in flows:
-            if f['cluster']:
-                cluster_totals[f['cluster']] = cluster_totals.get(f['cluster'], 0) + f['amount_usd']
-        top_clusters = sorted(cluster_totals.items(), key=lambda x: x[1], reverse=True)[:10]
+        def top(key):
+            totals = {}
+            for f in flows:
+                if f[key]:
+                    totals[f[key]] = totals.get(f[key], 0) + f['amount_usd']
+            return sorted(totals.items(), key=lambda x: x[1], reverse=True)[:10]
 
         return {
             'iso3': iso3.upper(),
             'year': year,
-            'total_funding_usd': total,
-            'n_flows': len(flows),
-            'n_committed': len(committed),
-            'n_pledged': len(pledged),
-            'top_donors': top_donors,
-            'top_clusters': top_clusters,
+            'total_funding_usd': inc.get('fundingTotal'),
+            'total_pledges_usd': inc.get('pledgeTotal'),
+            'n_flows': inc.get('flowCount'),
+            'n_flows_listed': len(flows),
+            'top_donors_listed': top('source_org'),
+            'top_clusters_listed': top('cluster'),
         }
 
     @staticmethod
@@ -273,9 +283,12 @@ if __name__ == '__main__':
     plans = hpc.get_plans(iso3)
     print('\nResponse Plans: {}'.format(len(plans)))
     for p in plans[:5]:
-        print('  {} ({}) — Req: ${:,.0f} / Funded: ${:,.0f} ({:.1f}%)'.format(
-            p['plan_name'][:50], p['year'],
-            p['requirements_usd'], p['funding_usd'], p['coverage_pct']))
+        # funding_usd / coverage_pct are None when not fetched (only the most
+        # recent plans are), and None must not print as $0.
+        print('  {} ({}) — Req: ${:,.0f} / Funded: {} ({})'.format(
+            p['plan_name'][:50], p['year'], p['requirements_usd'],
+            'n/a' if p['funding_usd'] is None else '${:,.0f}'.format(p['funding_usd']),
+            'n/a' if p['coverage_pct'] is None else '{:.1f}%'.format(p['coverage_pct'])))
 
     flows = hpc.get_funding_flows(iso3, year=2025, limit=20)
     print('\nFunding Flows (2025): {} flows fetched'.format(len(flows)))

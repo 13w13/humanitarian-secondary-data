@@ -22,11 +22,14 @@ import sys
 import os
 import re
 
-sys.stdout.reconfigure(encoding='utf-8')
+if hasattr(sys.stdout, 'reconfigure'):   # absent in Jupyter, IDLE, captured output
+    sys.stdout.reconfigure(encoding='utf-8')
 HERE = os.path.dirname(os.path.abspath(__file__))
 sys.path.insert(0, os.path.join(HERE, 'clients'))
 
-TMP = r'C:\tmp\msna_probe'
+# Downloads go to a fresh tempfile.mkdtemp() directory, deleted when the probe
+# ends (see probe). It used to be the literal r'C:\tmp\msna_probe': a RELATIVE
+# path on Linux and macOS, so household microdata landed in the repository.
 
 # Les 6 domaines fonctionnels du Washington Group Short Set. Une MSNA avec les WG-SS
 # a typiquement une colonne par domaine, nommee de facon variable selon l'ONG.
@@ -50,23 +53,23 @@ def _read_headers(path):
     sheets = {}
     for name in wb.sheetnames:
         ws = wb[name]
-        hdr = []
-        for row in ws.iter_rows(min_row=1, max_row=6, values_only=True):
-            cells = [re.sub(r'\s+', ' ', str(c)).strip() for c in row if c]
-            if len(cells) > len(hdr):
-                hdr = cells
-        sheets[name] = hdr
+        rows = [[re.sub(r'\s+', ' ', str(c)).strip() for c in row if c]
+                for row in ws.iter_rows(min_row=1, max_row=6, values_only=True)]
+        widest = max((len(r) for r in rows), default=0)
+        # The FIRST wide row is the header. Taking the widest one could pick a
+        # household record (answers) when the header has unnamed helper columns,
+        # and the probe would then print answers: it must only ever see names.
+        sheets[name] = next((r for r in rows if widest and len(r) >= widest / 2), [])
     wb.close()
     return sheets
 
 
-def _download_to_tmp(url):
-    from urllib.request import Request, urlopen
-    os.makedirs(TMP, exist_ok=True)
-    name = re.sub(r'[<>:"/\\|?*]', '_', url.split('/')[-1].split('?')[0])[:120]
+def _download_to_tmp(url, tmp_dir):
+    from config import download_stream, safe_filename
+    name = safe_filename(url.split('/')[-1].split('?')[0])
     if not name.lower().endswith(('.xlsx', '.xls', '.csv', '.zip')):
         name += '.xlsx'
-    path = os.path.join(TMP, name)
+    path = os.path.join(tmp_dir, name)
     # HDX et plusieurs hotes rejettent un UA trop generique -> UA navigateur par defaut.
     ua = ('Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/537.36 '
           '(KHTML, like Gecko) Chrome/126.0.0.0 Safari/537.36')
@@ -75,23 +78,37 @@ def _download_to_tmp(url):
         hdr = dict(PORTAL_HEADERS) if 'dtm.iom.int' in url else {'User-Agent': ua}
     except Exception:
         hdr = {'User-Agent': ua}
-    blob = urlopen(Request(url, headers=hdr), timeout=180).read()
-    open(path, 'wb').write(blob)
-    return path, len(blob)
+    size = download_stream(url, path, headers=hdr, timeout=180)
+    return path, size
 
 
 def probe(path_or_url):
+    """Probe one workbook. A downloaded file lives in a fresh temporary directory
+    outside the repository and is deleted when the probe ends, whatever happens."""
+    import shutil
+    import tempfile
     is_url = path_or_url.startswith(('http://', 'https://'))
-    if is_url:
-        print('telechargement vers {} (hors depot, hors git)...'.format(TMP))
-        path, size = _download_to_tmp(path_or_url)
+    if not is_url:
+        return _probe_file(path_or_url, is_url=False)
+    tmp_dir = tempfile.mkdtemp(prefix='msna_probe_')
+    try:
+        print('telechargement vers {} (hors depot, hors git, supprime a la fin)...'
+              .format(tmp_dir))
+        path, size = _download_to_tmp(path_or_url, tmp_dir)
         print('  {} ({:,} o)'.format(os.path.basename(path), size))
-    else:
-        path = path_or_url
+        return _probe_file(path, is_url=True)
+    finally:
+        shutil.rmtree(tmp_dir, ignore_errors=True)
+        print('microdonnee supprimee : {}'.format(tmp_dir))
 
-    if path.lower().endswith('.zip'):
-        print('  fichier ZIP : dezipper et relancer sur le .xlsx interne (non fait ici)')
-        return
+
+def _probe_file(path, is_url):
+    if not path.lower().endswith(('.xlsx', '.xlsm')):
+        # openpyxl reads only xlsx: a .csv/.xls crashed and a .zip returned early,
+        # both after the download, and both before the cleanup reminder.
+        print('  {} : seuls les .xlsx sont lus ici (dezipper / convertir, puis '
+              'relancer sur un chemin local)'.format(os.path.basename(path)))
+        return None
 
     sheets = _read_headers(path)
     print()
@@ -128,10 +145,6 @@ def probe(path_or_url):
         print('  Prochaine etape : desagreger la prevalence niveau 3+ par secteur de')
         print('  besoin (seuil standard, prevalence < 16 % normale).')
 
-    if is_url:
-        print()
-        print('⚠ Microdonnee dans {}. La SUPPRIMER apres analyse :'.format(TMP))
-        print('    del "{}"'.format(path))
     return found, generic
 
 

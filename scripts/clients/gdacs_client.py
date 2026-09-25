@@ -14,13 +14,14 @@ Usage:
     alerts = gdacs.get_alerts(event_type='EQ', alert_level='Red')
 """
 import sys
-sys.stdout.reconfigure(encoding='utf-8')
+if hasattr(sys.stdout, 'reconfigure'):   # absent in Jupyter, IDLE, captured output
+    sys.stdout.reconfigure(encoding='utf-8')
 
 import json
 from urllib.request import Request, urlopen
 from urllib.parse import urlencode
 
-from config import DEFAULT_TIMEOUT, USER_AGENT, save_csv
+from config import DEFAULT_TIMEOUT, USER_AGENT, save_csv, SourceUnavailable
 
 GDACS_BASE = 'https://www.gdacs.org/gdacsapi/api'
 
@@ -32,7 +33,7 @@ EVENT_TYPE_NAMES = {
 ALERT_LEVELS = ['Green', 'Orange', 'Red']
 
 
-class GDACSUnavailable(Exception):
+class GDACSUnavailable(SourceUnavailable):
     """GDACS injoignable : une PANNE, jamais une absence de catastrophe."""
 
 
@@ -41,6 +42,7 @@ class GDACSClient:
 
     def __init__(self):
         self.base = GDACS_BASE
+        self.last_saturated = False
 
     def _get(self, endpoint, params=None):
         """GET request to GDACS API. Returns parsed JSON.
@@ -82,7 +84,8 @@ class GDACSClient:
             limit: quand `iso3` est fourni, on elargit la fenetre serveur pour que le
                    filtrage cote client ait de la matiere.
         """
-        params = {'limit': str(max(limit, 200) if iso3 else limit)}
+        server_limit = max(limit, 200) if iso3 else limit
+        params = {'limit': str(server_limit)}
         if event_type:
             params['eventtype'] = event_type.upper()
         if alert_level:
@@ -94,10 +97,18 @@ class GDACSClient:
         if country and not iso3:
             params['country'] = country
 
+        used_fallback = False
         try:
             data = self._get('Events/geteventlist/SEARCH', params)
-        except Exception:
+        except Exception as e1:
+            if country and not iso3:
+                # The fallback cannot filter by country name: its answer would be
+                # world events presented as this country's.
+                raise GDACSUnavailable(
+                    'GDACS injoignable ({}) : PANNE, pas une absence d\'alerte'
+                    .format(str(e1)[:90]))
             # Fallback: try the RSS-to-JSON proxy format
+            used_fallback = True
             try:
                 alt_url = 'https://www.gdacs.org/gdacsapi/api/events?format=geojson'
                 if event_type:
@@ -120,6 +131,10 @@ class GDACSClient:
                     .format(str(e2)[:90]))
 
         features = data.get('features', [])
+        # The ISO3 filter runs client-side over the server's N most recent events
+        # worldwide. When N is reached, older in-country events were never seen:
+        # 0 alert is then NOT an absence.
+        self.last_saturated = bool(iso3) and len(features) >= server_limit
         records = []
         for f in features:
             props = f.get('properties', {})
@@ -168,12 +183,21 @@ class GDACSClient:
                 'url': (props.get('url') or {}).get('report', ''),
             })
 
+        if used_fallback and (date_from or date_to):
+            # The fallback URL carries no dates: re-apply them here.
+            records = [r for r in records
+                       if (not date_from or str(r['date_start'])[:10] >= date_from)
+                       and (not date_to or str(r['date_start'])[:10] <= date_to)]
         if iso3:
             want = iso3.upper()
             n_before = len(records)
             records = [r for r in records
                        if want in (r['affected_iso3'] or '').split(';')]
-            if not records:
+            if self.last_saturated:
+                print('  GDACS: {} evenements examines = la limite du serveur : les plus '
+                      'anciens n\'ont pas ete vus, la liste pour {} peut etre '
+                      'incomplete'.format(n_before, want))
+            elif not records:
                 print('  GDACS: 0 alerte pour {} sur {} evenements examines '
                       '(ABSENCE, pas panne : la reponse etait valide)'
                       .format(want, n_before))
@@ -195,8 +219,8 @@ class GDACSClient:
                 'eventid': str(event_id),
             })
         except Exception as e:
-            print('  GDACS detail: {}'.format(e))
-            return {}
+            # Same contract as get_alerts: an outage is not "no details".
+            raise GDACSUnavailable('GDACS detail injoignable ({})'.format(str(e)[:90]))
 
         props = data.get('properties', {})
         return {
@@ -208,8 +232,9 @@ class GDACSClient:
             'description': props.get('description', ''),
             'date_start': props.get('fromdate', ''),
             'date_end': props.get('todate', ''),
-            'severity_value': props.get('severity', {}).get('severity_value', ''),
-            'severity_text': props.get('severity', {}).get('severity_text', ''),
+            # `severitydata`, as in get_alerts: `severity` does not exist.
+            'severity_value': (props.get('severitydata') or {}).get('severity', ''),
+            'severity_text': (props.get('severitydata') or {}).get('severitytext', ''),
             'url': props.get('url', {}).get('report', ''),
         }
 

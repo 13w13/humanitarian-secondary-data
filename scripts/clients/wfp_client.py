@@ -11,13 +11,15 @@ Usage:
     data = wfp.get_country_data('LBN')
 """
 import sys
-sys.stdout.reconfigure(encoding='utf-8')
+if hasattr(sys.stdout, 'reconfigure'):   # absent in Jupyter, IDLE, captured output
+    sys.stdout.reconfigure(encoding='utf-8')
 
 import json
 from urllib.request import Request, urlopen
 
 from config import (
-    WFP_HUNGERMAP_BASE as WFP_BASE, DEFAULT_TIMEOUT, USER_AGENT, save_csv
+    WFP_HUNGERMAP_BASE as WFP_BASE, DEFAULT_TIMEOUT, USER_AGENT, save_csv,
+    NotCovered, raise_unavailable
 )
 
 # WFP HungerMap numeric country IDs (GAUL-style adm0 codes).
@@ -97,8 +99,7 @@ class WFPClient:
         try:
             raw = json.loads(urlopen(req, timeout=DEFAULT_TIMEOUT).read())
         except Exception as e:
-            print('  WFP IPC global: {}'.format(str(e)[:90]))
-            return []
+            raise_unavailable('WFP IPC global', e)
         rows = raw if isinstance(raw, list) else (raw.get('data') or [])
 
         def pop(rec, key):
@@ -164,7 +165,7 @@ class WFPClient:
         """
         iso3 = iso3.upper()
         if iso3 in WFP_NOT_PUBLIC:
-            raise ValueError(
+            raise NotCovered(
                 'HungerMap does not publicly serve {} (restricted-display list '
                 'in the WFP app itself). Use HAPI food-security (IPC).'.format(iso3))
         cid = WFP_COUNTRY_IDS.get(iso3)
@@ -173,7 +174,7 @@ class WFPClient:
         cid = self._resolve_id_dynamic(iso3)
         if cid:
             return cid
-        raise ValueError(
+        raise NotCovered(
             'No verified WFP id for {} - derive it via adm1-name fingerprint '
             'matching before adding to WFP_COUNTRY_IDS (see 2026-07-24 note).'.format(iso3))
 
@@ -205,21 +206,23 @@ class WFPClient:
         """Get food security overview for a country.
 
         Returns dict with: fcs, rcsi, population data.
+        Raises NotCovered when HungerMap does not serve the country, and
+        SourceUnavailable when it cannot be reached: neither is an empty dict.
         """
+        cid = self._resolve_id(iso3)
         try:
-            cid = self._resolve_id(iso3)
             data = self._get('adm0/{}/countryData.json'.format(cid))
         except Exception as e:
-            print('  WFP: {}'.format(e))
-            return {}
+            raise_unavailable('WFP countryData', e)
 
         if not data or not isinstance(data, dict):
             return {}
 
-        # Check for API error response
+        # An error payload is how HungerMap answers for a country it withholds
+        # (data policy, see WFP_NOT_PUBLIC): coverage, not an empty result.
         if 'error' in data:
-            print('  WFP error: {}'.format(data['error']))
-            return {}
+            raise NotCovered('HungerMap countryData refused {} (id {}): {}'.format(
+                iso3.upper(), cid, str(data['error'])[:80]))
 
         result = {
             'iso3': iso3.upper(),
@@ -227,18 +230,23 @@ class WFPClient:
         }
 
         # Population - legacy dict {number: N} or v2 float
+        # `population` is always PEOPLE in the output. The legacy schema gives a
+        # count, the v2 schema a float in MILLIONS (see fcs below): the column used
+        # to hold 41.45 next to 23,070,000 people depending on the schema.
         pop = data.get('population')
+        pop_m = None
         if isinstance(pop, dict):
-            result['population'] = pop.get('number', 0) or 0
+            result['population'] = pop.get('number') or None
         elif isinstance(pop, (int, float)):
-            result['population'] = pop
+            pop_m = pop
+            result['population'] = int(round(pop * 1_000_000))
         result['population_source'] = data.get('populationSource', '')
 
         # FCS - v2 schema (2026): top-level 'fcs' is a FLOAT in MILLIONS of
         # people (verified: id 276 fcs=0.1941 == fcsGraph 194,745 people;
         # AFG fcs=23.07 == ~23M). The fcsGraph carries the absolute daily
         # people series. Legacy schema: dict {people, prevalence}.
-        pop_m = result.get('population')  # millions in the v2 float schema
+        # pop_m: millions, set above for the v2 float schema only
         fcs = data.get('fcs')
         if isinstance(fcs, dict):
             result['fcs_people_insufficient'] = fcs.get('people', 0) or 0
@@ -272,12 +280,11 @@ class WFPClient:
         returns geojson-like {features: [{properties: {Code, Name,
         fcs: {ratio(%), people, ...}, rcsi: {...}, centroid, fcsGraph}}]}.
         """
+        cid = self._resolve_id(iso3)
         try:
-            cid = self._resolve_id(iso3)
             data = self._get('adm0/{}/adm1data.json'.format(cid))
         except Exception as e:
-            print('  WFP subnational: {}'.format(e))
-            return []
+            raise_unavailable('WFP subnational', e)
 
         feats = data.get('features', []) if isinstance(data, dict) else []
         records = []
@@ -285,14 +292,19 @@ class WFPClient:
             p = f.get('properties') or {}
             fcs = p.get('fcs') if isinstance(p.get('fcs'), dict) else {}
             rcsi = p.get('rcsi') if isinstance(p.get('rcsi'), dict) else {}
+            # A region without a value is None, not 0 % (rule 5: absence is not
+            # "nobody food insecure").
+            def ratio(d):
+                v = d.get('ratio')
+                return round(v / 100.0, 4) if isinstance(v, (int, float)) else None
             records.append({
                 'iso3': iso3.upper(),
                 'admin1_name': p.get('Name', ''),
                 'admin1_code': p.get('Code', ''),
-                'fcs_prevalence': round((fcs.get('ratio', 0) or 0) / 100.0, 4),
-                'fcs_people': fcs.get('people', 0) or 0,
-                'rcsi_prevalence': round((rcsi.get('ratio', 0) or 0) / 100.0, 4),
-                'rcsi_people': rcsi.get('people', 0) or 0,
+                'fcs_prevalence': ratio(fcs),
+                'fcs_people': fcs.get('people'),
+                'rcsi_prevalence': ratio(rcsi),
+                'rcsi_people': rcsi.get('people'),
             })
         return records
 

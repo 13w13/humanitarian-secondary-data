@@ -100,7 +100,195 @@ RATE_LIMIT_DELAY = 0.5  # seconds between API calls
 
 # ─── Shared utilities ──────────────────────────────────────
 import csv
+import http.client
 import os
+import re
+import socket
+from urllib.error import HTTPError, URLError
+
+
+# ─── Failure taxonomy ───────────────────────────────────────
+# Four ways a request can come back without data, and none of them is "0 rows".
+# Before these existed, eight clients caught every error, printed it and returned
+# [], so a blocked network produced "0 plans, $0 funded", "stock 0 IDPs" and
+# "0 conflict events" for Sudan, and the run exited 0 (test of 2026-09-24).
+
+class SourceUnavailable(Exception):
+    """The provider could not be reached, or answered with a server error.
+
+    An OUTAGE, never an absence of data. Raised instead of returning [] so that no
+    caller can turn a failed request into a count. The pipeline records it as
+    `unavailable`, the test suites as SKIP.
+    """
+
+
+class MissingCredential(ValueError):
+    """A free key this source requires is not configured: a skip, not a zero.
+
+    Subclasses ValueError so existing `except ValueError` handlers still catch it
+    (ACLED raised a bare ValueError for this case before the class existed).
+    """
+
+
+class NotCovered(ValueError):
+    """The source does not cover this country. Absence of coverage, said out loud.
+
+    Distinct from an empty answer: the question was never asked, because this
+    source has no id, region or facet for the country.
+    """
+
+
+RELIEFWEB_APPNAME_HELP = (
+    'ReliefWeb refused the appname (HTTP 403): since 1 Nov 2025 it must be '
+    'pre-approved. Request one at https://apidoc.reliefweb.int/parameters#appname, then set '
+    'RELIEFWEB_APPNAME (or keyring sds.reliefweb/appname).')
+
+
+def is_outage(exc):
+    """True when `exc` says the provider is down rather than that we have a bug.
+
+    Outages: HTTP 5xx and 429, transport failures (timeout, refused or reset
+    connection, DNS, a proxy refusing the tunnel, a truncated response) and
+    SourceUnavailable itself. Not outages: other 4xx (a wrong URL or parameter
+    is our bug), KeyError / ValueError (the response changed shape). Keeping the
+    two apart is what lets a red test mean "fix the code" rather than "a provider
+    had a bad afternoon".
+    """
+    if isinstance(exc, SourceUnavailable):
+        return True
+    if isinstance(exc, HTTPError):             # before URLError: it subclasses it
+        return exc.code >= 500 or exc.code == 429
+    return isinstance(exc, (URLError, socket.timeout, TimeoutError,
+                            ConnectionError, http.client.HTTPException))
+
+
+MAX_DOWNLOAD_BYTES = 512 * 1024 * 1024
+
+
+def safe_opener():
+    """A urllib opener for FILE downloads that follows redirects to http(s) only.
+
+    The scheme check on the first URL was not enough: urllib follows a 302 to
+    ftp:// by default, and to another host with the same headers. Downloads use
+    this opener; the API clients still use plain urlopen (see the review of
+    2026-09: one shared HTTP layer is the lasting fix).
+    """
+    from urllib.parse import urlsplit
+    from urllib.request import HTTPRedirectHandler, build_opener
+
+    class _HttpOnlyRedirect(HTTPRedirectHandler):
+        def redirect_request(self, req, fp, code, msg, headers, newurl):
+            if urlsplit(newurl).scheme.lower() not in ('http', 'https'):
+                raise HTTPError(newurl, code, 'refused redirect to a non-http(s) URL',
+                                headers, fp)
+            new = super().redirect_request(req, fp, code, msg, headers, newurl)
+            if new is not None and urlsplit(newurl).netloc != urlsplit(req.full_url).netloc:
+                for h in ('Authorization', 'Cookie'):    # never forward credentials
+                    new.remove_header(h)
+            return new
+
+    return build_opener(_HttpOnlyRedirect)
+
+
+def sniff_mismatch(first_bytes, path):
+    """Why the first bytes cannot be the file `path` claims to be, or None.
+
+    An HTML login or error page answered with HTTP 200 used to be saved under a
+    .xlsx name; a truncated zip still carries the right extension.
+    """
+    head = first_bytes[:512].lstrip().lower()
+    ext = os.path.splitext(path)[1].lower()
+    if ext not in ('.html', '.htm') and (head.startswith(b'<!doctype html')
+                                        or head.startswith(b'<html')):
+        return 'an HTML page came back instead of a {} file'.format(ext or 'data')
+    if ext in ('.xlsx', '.xlsm', '.zip', '.docx') and not first_bytes.startswith(b'PK'):
+        return 'not a zip container, so not a valid {} file'.format(ext)
+    if ext == '.pdf' and not first_bytes.startswith(b'%PDF'):
+        return 'not a PDF'
+    return None
+_FILENAME_BAD = re.compile(r'[^A-Za-z0-9._ ()-]+')
+
+
+def safe_filename(name, default='resource'):
+    """A publisher-supplied name reduced to one harmless path component.
+
+    Resource names come from remote metadata: "IDPs 2023/2024" or "../../x" must
+    neither create directories nor climb out of the output folder.
+    """
+    # Separators become '_' rather than cutting the name: "IDPs 2023/2024" keeps
+    # both years, and "../../x" can no longer climb out of the folder.
+    base = str(name or '').replace('\\', '_').replace('/', '_')
+    base = _FILENAME_BAD.sub('_', base).strip(' ._')
+    return base[:150] or default
+
+
+def download_stream(url, dest_path, headers=None, timeout=60,
+                    max_bytes=MAX_DOWNLOAD_BYTES):
+    """Stream `url` to `dest_path` safely; return the number of bytes written.
+
+    http/https only (a `file://` URL in remote metadata must not be read), a size
+    cap, a `.part` file moved into place with os.replace once complete, and the
+    partial file deleted on any failure: a truncated workbook still opens and still
+    sums. Raises on failure (SourceUnavailable for an outage).
+    """
+    import zipfile
+    from urllib.request import Request
+    if not str(url).lower().startswith(('http://', 'https://')):
+        raise ValueError('refused scheme (only http/https): {}'.format(str(url)[:80]))
+    tmp_path = dest_path + '.part'
+    try:
+        resp = safe_opener().open(
+            Request(url, headers=headers or {'User-Agent': USER_AGENT}), timeout=timeout)
+        declared = resp.headers.get('Content-Length')
+        if declared and declared.isdigit() and int(declared) > max_bytes:
+            raise ValueError('declared size {:,} B exceeds cap {:,} B'.format(
+                int(declared), max_bytes))
+        written, first = 0, b''
+        with open(tmp_path, 'wb') as f:
+            while True:
+                chunk = resp.read(1024 * 1024)
+                if not chunk:
+                    break
+                if not first:
+                    first = chunk[:512]
+                written += len(chunk)
+                if written > max_bytes:
+                    raise ValueError('exceeded cap {:,} B while streaming'.format(max_bytes))
+                f.write(chunk)
+        if written == 0:
+            raise ValueError('empty response body')
+        # A dropped connection ends the stream early without an error.
+        if declared and declared.isdigit() and written != int(declared):
+            raise ValueError('truncated: {:,} of {:,} declared bytes'.format(
+                written, int(declared)))
+        why = sniff_mismatch(first, dest_path)
+        if why:
+            raise ValueError(why)
+        if dest_path.lower().endswith(('.xlsx', '.xlsm', '.zip')) \
+                and not zipfile.is_zipfile(tmp_path):
+            raise ValueError('incomplete zip container (truncated download?)')
+        os.replace(tmp_path, dest_path)
+        return written
+    except Exception as e:
+        try:
+            if os.path.exists(tmp_path):
+                os.remove(tmp_path)
+        except OSError:
+            pass
+        raise_unavailable('download {}'.format(str(url)[:80]), e)
+
+
+def raise_unavailable(label, exc):
+    """Re-raise `exc` as SourceUnavailable if it is an outage, unchanged otherwise.
+
+    Call from inside an `except` block:
+
+        except Exception as e:
+            raise_unavailable('HPC plans', e)
+    """
+    if is_outage(exc):
+        raise SourceUnavailable('{}: {}'.format(label, exc)) from exc
+    raise exc
 
 
 def get_credential(service, field, *env_vars):
@@ -119,15 +307,18 @@ def get_credential(service, field, *env_vars):
     """
     try:
         import keyring
-    except Exception:                      # not installed, or no usable backend
+        got = keyring.get_password(service, field)
+        if got:
+            return got
+    except (KeyboardInterrupt, SystemExit):
+        raise
+    except BaseException:  # noqa: BLE001 - see below
+        # Not installed, no usable backend, locked keychain, D-Bus absent... and
+        # worse: a broken system backend can PANIC while loading (pyo3's
+        # PanicException from `cryptography`, observed 2026-09-25), which is a
+        # BaseException, not an Exception. It crashed the whole toolkit although
+        # keyring is optional. Any keychain failure means "use the environment".
         pass
-    else:
-        try:
-            got = keyring.get_password(service, field)
-            if got:
-                return got
-        except Exception:                  # locked keychain, D-Bus absent, etc.
-            pass
     for name in env_vars:
         got = os.environ.get(name)
         if got:

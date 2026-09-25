@@ -63,24 +63,39 @@ events. **This toolkit deliberately does not bring survey microdata into the
 repository.** Assessment microdata contains household-level answers, which is
 personal data.
 
-`wgss_probe.py` is the one script that touches such a file. It downloads to a
-temporary directory outside the repository and outside git, reads only column
-*names* and a count, never values, and tells you to delete the file afterwards.
+`wgss_probe.py` is the one script that touches such a file. It downloads to a fresh
+temporary directory outside the repository and outside git (`tempfile.mkdtemp`),
+reads only column *names*, never values, and deletes the file when it ends, whatever
+happens.
 Keep it that way: do not commit microdata, and do not put it in a synced folder.
 
 ## Downloads
 
-`_download_file()` accepts `http` and `https` only, caps the response size, streams
-to a `.part` file, and moves it into place with `os.replace()` once complete. A
-failed download is deleted rather than left behind, because a truncated workbook
-still opens and still sums, and a short total that looks plausible is the failure
-mode this project exists to prevent.
+Every file download (`download_catalogue._download_file()`, `config.download_stream()`,
+`DTMClient.download_dataset()`, the report PDF cache) accepts `http` and `https` only,
+also on redirects (urllib alone follows a redirect to `ftp://`), caps the response
+size, streams to a `.part` file, and moves it into place with `os.replace()` once
+complete. A body shorter than its declared length, an HTML page where a workbook was
+expected, or a zip container that does not open is refused. A failed download is
+deleted rather than left behind, because a truncated workbook still opens and still
+sums, and a short total that looks plausible is the failure mode this project exists
+to prevent. `scripts/test_hardening.py` checks this against a local test server.
+
+File names that come from remote metadata (resource names, `Content-Disposition`) are
+reduced to a single path component before use.
+
+Text from remote sources is written to CSV unchanged. A cell that begins with `=`,
+`+`, `-` or `@` can be read as a formula by a spreadsheet: open downloaded CSVs as
+data (import them), not by double-clicking, if their origin is not trusted.
 
 ## Rate limits and scraping
 
-The clients pace themselves and identify themselves with a real User-Agent. One
-source (Liveuamap) is scraped from HTML because it has no API, with deliberate
-delays and a page cap.
+The API clients pace themselves and identify themselves with the toolkit's
+User-Agent. Two sources are read from web pages rather than an API, and both reject
+that User-Agent: the DTM dataset portal and Liveuamap. For those two the toolkit sends
+a single, fixed browser header profile, with deliberate delays and a page cap. That is
+a compromise, stated here so it can be judged; the better fix is an agreement with the
+provider.
 
 Do not add User-Agent rotation, proxy cycling, or anything else whose purpose is to
 get around a provider's rate limiting. If a limit is in the way, use `--date-from`

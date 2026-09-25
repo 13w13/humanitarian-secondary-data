@@ -15,7 +15,7 @@ Usage:
     datasets = client.search_msna_datasets()
 
     # Filter by country
-    datasets = client.search_msna_datasets(country='Palestine')
+    datasets = client.search_msna_datasets(country_iso3='PSE')
 
     # Search by keywords
     results = client.search(keywords='disability palestine', limit=50)
@@ -24,27 +24,32 @@ Usage:
     resources = client.get_country_resources('PS')
 
 Note: This scrapes HTML responses — fragile if IMPACT changes their site.
-Always check gotchas.md for current status.
+Run scripts/health_check.py for the current status of the endpoint.
 
 License: MIT
 """
 import sys
-sys.stdout.reconfigure(encoding='utf-8')
+if hasattr(sys.stdout, 'reconfigure'):   # absent in Jupyter, IDLE, captured output
+    sys.stdout.reconfigure(encoding='utf-8')
 
 import csv
 import json
 import os
 import re
 import time
+from html import unescape
 from urllib.request import Request, urlopen
 from urllib.parse import urlencode
 
 # Works standalone (no dependencies) or as part of the SDS toolkit
 try:
-    from config import DEFAULT_TIMEOUT, USER_AGENT, save_csv
+    from config import DEFAULT_TIMEOUT, USER_AGENT, save_csv, NotCovered
 except ImportError:
     DEFAULT_TIMEOUT = 30
     USER_AGENT = 'impact-client/1.0'
+
+    class NotCovered(ValueError):
+        """The source does not cover this country."""
 
     def save_csv(records, filepath):
         if not records:
@@ -169,12 +174,13 @@ class IMPACTClient:
             if not title_match:
                 continue
 
-            url = title_match.group(1)
-            title = title_match.group(2).strip()
+            url = unescape(title_match.group(1))
+            # Entities decoded: the shipped example read "Food Security &amp; ..."
+            title = unescape(title_match.group(2)).strip()
 
             # Country
             country_match = re.search(r'<h4>([^<]*)</h4>', block)
-            country = country_match.group(1).strip() if country_match else ''
+            country = unescape(country_match.group(1)).strip() if country_match else ''
 
             # Document type + Published date
             type_match = re.search(r'<span>([^<]+)</span>\s*<span>Published:', block)
@@ -185,11 +191,11 @@ class IMPACTClient:
 
             # Programme
             prog_match = re.search(r'Programme:</strong>\s*([^<]+)<', block)
-            programme = prog_match.group(1).strip() if prog_match else ''
+            programme = unescape(prog_match.group(1)).strip() if prog_match else ''
 
             # Sector
             sector_match = re.search(r'Sector/cluster:</strong>\s*([^<]+)<', block)
-            sector = sector_match.group(1).strip() if sector_match else ''
+            sector = unescape(sector_match.group(1)).strip() if sector_match else ''
 
             # Collection date
             coll_match = re.search(r'Data collection date:</strong>\s*([^<]+)<', block)
@@ -253,8 +259,13 @@ class IMPACTClient:
 
         if location_iso3:
             lid = LOCATION_IDS.get(location_iso3.upper())
-            if lid:
-                args['location'] = [lid]
+            if not lid:
+                # Used to drop the filter silently: the WORLD catalogue then came
+                # back labelled as this country (PAK, BDI, IRN...).
+                raise NotCovered(
+                    'IMPACT: no location id for {} in LOCATION_IDS; refusing to '
+                    'search without a country filter.'.format(location_iso3.upper()))
+            args['location'] = [lid]
 
         data = self._ajax_post('screen_resources', args)
         html = data.get('html', '')
@@ -262,6 +273,11 @@ class IMPACTClient:
 
         resources = self._parse_resources_html(html)
         total = self._get_total_results(pagination)
+        if resources and not total:
+            # "N Results" unreadable (reworded, translated): paging would stop after
+            # page 1 and a partial list would pass for the whole catalogue.
+            raise ValueError('IMPACT: {} rows returned but the result count could not '
+                             'be read from the pagination block'.format(len(resources)))
 
         return {
             'total': total,

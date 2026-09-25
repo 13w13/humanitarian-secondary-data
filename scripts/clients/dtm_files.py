@@ -38,7 +38,8 @@ Usage :
     checksum(total, 120099, 'TOTAL INFLOWS 05-18 Jul')   # -> True si EXACT
 """
 import sys
-sys.stdout.reconfigure(encoding='utf-8')
+if hasattr(sys.stdout, 'reconfigure'):   # absent in Jupyter, IDLE, captured output
+    sys.stdout.reconfigure(encoding='utf-8')
 
 import datetime as _dt
 import os
@@ -272,7 +273,7 @@ def sum_by(records, value_col, filters=None, date_col=None, date_from=None,
             'Passer strict=False pour forcer.'.format(value_col))
     a = _as_date(date_from) if date_from else None
     b = _as_date(date_to) if date_to else None
-    groups, kept, unreadable = {}, 0, 0
+    groups, kept, unreadable, undated = {}, 0, 0, 0
     for r in records:
         if filters:
             skip = False
@@ -285,8 +286,16 @@ def sum_by(records, value_col, filters=None, date_col=None, date_from=None,
             if skip:
                 continue
         if date_col and (a or b):
-            x = _as_date(r.get(date_col))
-            if not x or (a and x < a) or (b and x > b):
+            try:
+                x = _as_date(r.get(date_col))
+            except ValueError:          # "2026-02-30": an invalid date, not a crash
+                x = None
+            if not x:
+                # Counted, not silently dropped: a row without a readable date
+                # cannot be placed in the window, and the total must say so.
+                undated += 1
+                continue
+            if (a and x < a) or (b and x > b):
                 continue
         val = _num(r.get(value_col))
         if val is None:
@@ -295,8 +304,11 @@ def sum_by(records, value_col, filters=None, date_col=None, date_from=None,
         key = str(r.get(group_by, '')).strip() if group_by else '__total__'
         groups[key] = groups.get(key, 0.0) + val
         kept += 1
-    result = {'rows': kept, 'unreadable': unreadable,
+    result = {'rows': kept, 'unreadable': unreadable, 'undated': undated,
               'total': sum(groups.values()) if groups else 0.0}
+    if undated:
+        result['warning_undated'] = ('{} ligne(s) sans date lisible exclue(s) de la '
+                                     'periode : le total peut etre court'.format(undated))
     if group_by:
         result['groups'] = dict(sorted(groups.items(), key=lambda kv: -kv[1]))
     if kept == 0:

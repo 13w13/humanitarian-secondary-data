@@ -2,7 +2,9 @@
 
 > Every command and output below was **actually run on 2026-07-25**. Nothing is
 > hypothetical. Where a walkthrough exposed a packaging bug, the bug was fixed the
-> same day (listed at the bottom).
+> same day (listed at the bottom). Since then ReliefWeb requires a pre-approved
+> appname (`RELIEFWEB_APPNAME`) for walkthroughs 2 and 3, and a DTM tracker download
+> is saved under its real name (`100046_<name>.xlsx`).
 
 ---
 
@@ -36,7 +38,8 @@ tool says so, and points to the published report for the headline figure.
 *Goal: the latest displacement figure for Lebanon, safe to paste in a sitrep.*
 
 ```bash
-python -X utf8 scripts/explore.py LBN        # ~7 s
+export RELIEFWEB_APPNAME=...                 # pre-approved, free (since Nov 2025)
+python -X utf8 scripts/explore.py LBN        # ~10 s
 ```
 
 ```
@@ -56,6 +59,7 @@ months stale): the number a naive integration would have used.
 *Goal: an analytical read on Venezuela after the June earthquake.*
 
 ```python
+import sys; sys.path.insert(0, 'scripts/clients')   # from the repository root
 from report_figures import analytical_findings
 d = analytical_findings('VEN', source='ACAPS')
 ```
@@ -75,6 +79,7 @@ measurement.
 *Goal: from raw file to a presentable chart, with the reading validated first.*
 
 ```python
+import sys; sys.path.insert(0, 'scripts/clients')   # from the repository root
 from dtm_files import read_sheet, sum_by, checksum
 cols, hxl, recs = read_sheet(path)               # picks the DATA sheet by shape
 r = sum_by(recs, 'Total Headcount', {'Direction': 'Inflow'},

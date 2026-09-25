@@ -11,13 +11,15 @@ Usage:
     appeals = ifrc.get_appeals(country_id=84)
 """
 import sys
-sys.stdout.reconfigure(encoding='utf-8')
+if hasattr(sys.stdout, 'reconfigure'):   # absent in Jupyter, IDLE, captured output
+    sys.stdout.reconfigure(encoding='utf-8')
 
 import json
 from urllib.request import Request, urlopen
 from urllib.parse import urlencode
 
-from config import DEFAULT_TIMEOUT, USER_AGENT, save_csv
+from config import (DEFAULT_TIMEOUT, USER_AGENT, save_csv, NotCovered,
+                    raise_unavailable)
 
 IFRCGO_BASE = 'https://goadmin.ifrc.org/api/v2'
 
@@ -54,26 +56,28 @@ class IFRCGoClient:
         cid = IFRC_COUNTRY_IDS.get(iso3)
         if cid:
             return cid
-        # Dynamic resolution — fetch countries and match iso3
+        # Dynamic resolution — fetch countries and match iso3.
+        # A network failure here used to be swallowed and reported as "No IFRC Go
+        # ID for SDN. Check ISO3 code.": an outage blamed on the user's input.
         try:
             # ⚠ `limit: 300` est une valeur en dur : si l'IFRC depasse 300 pays/
             # territoires, la resolution ISO3 echouerait en silence pour la queue de
             # liste. On verifie le compte annonce par l'API contre ce qu'on a recu.
             data = self._get('country/', {'limit': 300})
-            total = data.get('count')
-            got = len(data.get('results') or [])
-            if isinstance(total, int) and got < total:
-                print('  IFRC GO: {} pays recus sur {} annonces (limit=300 trop bas) '
-                      '-> resolution ISO3 incomplete'.format(got, total))
-            results = data.get('results', [])
-            for c in results:
-                c_iso3 = (c.get('iso3') or c.get('iso') or '').upper()
-                if c_iso3 == iso3:
-                    IFRC_COUNTRY_IDS[iso3] = c['id']
-                    return c['id']
-        except Exception:
-            pass
-        raise ValueError('No IFRC Go ID for {}. Check ISO3 code.'.format(iso3))
+        except Exception as e:
+            raise_unavailable('IFRC GO country list', e)
+        total = data.get('count')
+        got = len(data.get('results') or [])
+        if isinstance(total, int) and got < total:
+            print('  IFRC GO: {} pays recus sur {} annonces (limit=300 trop bas) '
+                  '-> resolution ISO3 incomplete'.format(got, total))
+        for c in data.get('results') or []:
+            c_iso3 = (c.get('iso3') or c.get('iso') or '').upper()
+            if c_iso3 == iso3:
+                IFRC_COUNTRY_IDS[iso3] = c['id']
+                return c['id']
+        raise NotCovered('IFRC GO lists no country with ISO3 {} ({} countries '
+                         'received).'.format(iso3, got))
 
     def _paginate(self, endpoint, params=None, max_results=500):
         """Paginate through IFRC Go results (limit+offset)."""
@@ -123,8 +127,19 @@ class IFRCGoClient:
         try:
             results = self._paginate('event/', params, max_results=limit)
         except Exception as e:
-            print('  IFRC Go emergencies: {}'.format(e))
-            return []
+            raise_unavailable('IFRC GO emergencies', e)
+
+        # Scope post-condition, as for appeals: an ignored filter returns the world.
+        if iso3 and not country_id:
+            want = iso3.upper()
+            stray = [ev.get('name', '') for ev in results
+                     if ev.get('countries') and want not in
+                     [str(c.get('iso3') or '').upper() for c in ev['countries']
+                      if isinstance(c, dict)]
+                     and any(isinstance(c, dict) and c.get('iso3') for c in ev['countries'])]
+            if stray:
+                raise ValueError('IFRC GO event/ returned events outside {} ({}): the '
+                                 'country filter did not apply'.format(want, stray[:3]))
 
         records = []
         for ev in results:
@@ -135,7 +150,9 @@ class IFRCGoClient:
                 'event_id': ev.get('id', ''),
                 'name': ev.get('name', ''),
                 'dtype': ev.get('dtype', {}).get('name', '') if isinstance(ev.get('dtype'), dict) else '',
-                'status': 'active' if ev.get('is_featured') else 'past',
+                # GO's `is_featured` is "shown on the home page", not a status: it
+                # used to be exported as status active/past.
+                'is_featured': bool(ev.get('is_featured')),
                 'num_affected': ev.get('num_affected') or 0,
                 'num_dead': ev.get('num_dead') or 0,
                 'num_injured': ev.get('num_injured') or 0,
@@ -181,8 +198,7 @@ class IFRCGoClient:
         try:
             results = self._paginate('appeal/', params, max_results=limit)
         except Exception as e:
-            print('  IFRC Go appeals: {}'.format(e))
-            return []
+            raise_unavailable('IFRC GO appeals', e)
 
         # Post-condition : le filtre a-t-il porte ? Un parametre ignore par cette API
         # ne produit aucune erreur, seulement le corpus mondial.
@@ -208,8 +224,11 @@ class IFRCGoClient:
                 'amount_requested_chf': ap.get('amount_requested') or 0,
                 'amount_funded_chf': ap.get('amount_funded') or 0,
                 'currency': 'CHF',
-                'coverage_pct': round(
-                    (ap.get('amount_funded', 0) or 0) / (ap.get('amount_requested', 1) or 1) * 100, 1),
+                # None when nothing was requested: `/ (requested or 1)` turned a
+                # missing request into 5,000,000 % coverage.
+                'coverage_pct': (round((ap.get('amount_funded') or 0)
+                                       / ap['amount_requested'] * 100, 1)
+                                 if ap.get('amount_requested') else None),
                 'num_beneficiaries': ap.get('num_beneficiaries') or 0,
                 'start_date': ap.get('start_date', ''),
                 'end_date': ap.get('end_date', ''),
@@ -232,8 +251,7 @@ class IFRCGoClient:
         try:
             results = self._paginate('field-report/', params, max_results=limit)
         except Exception as e:
-            print('  IFRC Go field reports: {}'.format(e))
-            return []
+            raise_unavailable('IFRC GO field reports', e)
 
         records = []
         for fr in results:
@@ -268,8 +286,7 @@ class IFRCGoClient:
         try:
             results = self._paginate('project/', params, max_results=limit)
         except Exception as e:
-            print('  IFRC Go projects: {}'.format(e))
-            return []
+            raise_unavailable('IFRC GO projects', e)
 
         records = []
         for proj in results:
@@ -296,14 +313,12 @@ class IFRCGoClient:
         Returns dict with: country info, society name, INFORM score, key figures.
         """
         iso3 = iso3.upper()
+        # Resolve country ID first, then fetch by ID for accuracy
+        cid = self._resolve_country_id(iso3)
         try:
-            # Resolve country ID first, then fetch by ID for accuracy
-            cid = self._resolve_country_id(iso3)
-            data = self._get('country/{}/'.format(cid))
-            c = data  # Direct object, not paginated
+            c = self._get('country/{}/'.format(cid))  # Direct object, not paginated
         except Exception as e:
-            print('  IFRC Go country: {}'.format(e))
-            return {}
+            raise_unavailable('IFRC GO country', e)
 
         if not c or not isinstance(c, dict):
             return {}
@@ -346,10 +361,11 @@ if __name__ == '__main__':
     appeals = ifrc.get_appeals(iso3=iso3, limit=10)
     print('\nAppeals: {}'.format(len(appeals)))
     for ap in appeals[:5]:
-        print('  [{}] {} — ${:,.0f} / ${:,.0f} ({:.1f}%) [{}]'.format(
+        print('  [{}] {} — CHF {:,.0f} / CHF {:,.0f} ({}) [{}]'.format(
             ap['code'], ap['name'][:40],
             ap['amount_funded_chf'], ap['amount_requested_chf'],
-            ap['coverage_pct'], ap['atype']))
+            'n/a' if ap['coverage_pct'] is None else '{:.1f}%'.format(ap['coverage_pct']),
+            ap['atype']))
 
     projects = ifrc.get_projects(iso3=iso3, limit=10)
     print('\nProjects (3W): {}'.format(len(projects)))

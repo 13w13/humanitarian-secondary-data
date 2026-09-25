@@ -19,6 +19,9 @@ _report_cache/
 *.png
 *.xlsx
 *.xls
+*.zip
+# interrupted downloads (streamed to .part, then moved into place)
+*.part
 
 .vscode/
 .idea/
@@ -33,3 +36,5 @@ health_check*.md
 *_FINDINGS.md
 NOTES_*.md
 C_tmp/
+# test reports written next to the scripts
+scripts/skill_50_results.md

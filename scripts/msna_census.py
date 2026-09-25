@@ -36,7 +36,8 @@ import time
 from urllib.request import urlopen
 from urllib.parse import quote
 
-sys.stdout.reconfigure(encoding='utf-8')
+if hasattr(sys.stdout, 'reconfigure'):   # absent in Jupyter, IDLE, captured output
+    sys.stdout.reconfigure(encoding='utf-8')
 
 HERE = os.path.dirname(os.path.abspath(__file__))
 sys.path.insert(0, os.path.join(HERE, 'clients'))
@@ -70,12 +71,10 @@ MSNA_HINT = re.compile(r'\bmsna\b|multi[- ]?sector\w*\s+needs?\s+assessment|'
 
 
 def ckan(params):
-    try:
-        raw = urlopen('{}?{}'.format(CKAN, params), timeout=60).read()
-        return json.loads(raw).get('result', {}) or {}
-    except Exception as e:
-        print('  HDX: {}'.format(str(e)[:90]))
-        return {}
+    # Raises on failure: an unreachable HDX used to come back as {} and count as
+    # "0 MSNA" for the country.
+    raw = urlopen('{}?{}'.format(CKAN, params), timeout=60).read()
+    return json.loads(raw).get('result', {}) or {}
 
 
 def census_reliefweb(iso3):
@@ -100,16 +99,14 @@ def census_reliefweb(iso3):
                                    'file.mimetype', 'format.name']},
             'sort': ['date.original:desc'], 'limit': 10,
         }
-        try:
-            data = json.loads(urlopen(Request(
-                'https://api.reliefweb.int/v2/reports?appname=' + app,
-                data=json.dumps(payload).encode(),
-                headers={'Content-Type': 'application/json',
-                         'User-Agent': 'humanitarian-secondary-data/1.0'}),
-                timeout=45).read())
-        except Exception as e:
-            print('  ReliefWeb {} {}: {}'.format(iso3, src, str(e)[:60]))
-            continue
+        # No try: a failed request is a failed channel (reported by main), not
+        # a source with zero MSNA products.
+        data = json.loads(urlopen(Request(
+            'https://api.reliefweb.int/v2/reports?appname=' + app,
+            data=json.dumps(payload).encode(),
+            headers={'Content-Type': 'application/json',
+                     'User-Agent': 'humanitarian-secondary-data/1.0'}),
+            timeout=45).read())
         for d in data.get('data', []):
             f = d['fields']
             files = f.get('file') or []
@@ -136,11 +133,12 @@ def census_dtm(iso3):
     (janvier 2026), Haiti (mars 2026), 8 produits Afghanistan. L'Ukraine verrouille les
     siennes, coherent avec sa politique sur la microdonnee d'enquete.
     """
+    from config import NotCovered
+    from dtm_client import DTMClient
     try:
-        from dtm_client import DTMClient
         rows = DTMClient().browse_catalogue(iso3, max_pages=3)
-    except Exception:
-        return []
+    except NotCovered:
+        return []           # no DTM catalogue for this country: nothing to census
     out = []
     for r in rows:
         blob = (r['title'] + ' ' + r['activities']).lower()
@@ -212,13 +210,18 @@ def main(argv):
         len(countries)))
     print('=' * 78)
     all_rows = []
+    incomplete = {}
     for iso3 in countries:
         rows = []
+        failed = []
         for coll in (census_reliefweb, census_dtm, census_country):
             try:
                 rows.extend(coll(iso3))
             except Exception as e:
+                failed.append(coll.__name__.replace('census_', ''))
                 print('  {} {}: {}'.format(iso3, coll.__name__, str(e)[:60]))
+        if failed:
+            incomplete[iso3] = failed
         for r in rows:              # les lignes HDX n'ont pas ces cles
             r.setdefault('channel', 'hdx')
             r.setdefault('org', '')
@@ -232,7 +235,11 @@ def main(argv):
             by[r['channel']] = by.get(r['channel'], 0) + 1
         latest = max([str(r.get('date', ''))[:10] for r in rows if r.get('date')],
                      default='?')
-        flag = '' if rows else '   (rien sur les 3 canaux)'
+        if failed:
+            # A failed channel counts nothing: its 0 below is not an absence.
+            flag = '   (INCOMPLET : {} injoignable)'.format(', '.join(failed))
+        else:
+            flag = '' if rows else '   (rien sur les 3 canaux)'
         print('  {:5} {:>3} produits (rw {:>2} / dtm {:>2} / hdx {:>2}) | {:>2} fichiers '
               '| {:>2} WG-SS | + recent {}{}'.format(
                   iso3, len(rows), by.get('reliefweb', 0), by.get('dtm', 0),
@@ -256,10 +263,17 @@ def main(argv):
     print('  pays avec une MSNA        ({:>2}) : {}'.format(len(pays_avec), ' '.join(pays_avec)))
     print('  pays avec de la donnee    ({:>2}) : {}'.format(len(pays_data), ' '.join(pays_data)))
     print('  pays avec indice WG-SS    ({:>2}) : {}'.format(len(pays_wg), ' '.join(pays_wg)))
+    if incomplete:
+        print('  pays INCOMPLETS           ({:>2}) : {}'.format(
+            len(incomplete), ' '.join('{}({})'.format(k, '+'.join(v))
+                                      for k, v in sorted(incomplete.items()))))
+        print('    -> un canal injoignable ne compte rien : ces pays ne sont PAS '
+              '"sans MSNA".')
     print()
     print('  ⚠ `wg_hint` est un INDICE tire du titre et des descriptions, PAS une')
     print('    confirmation : seule l\'ouverture du fichier tranche. Prochaine etape,')
-    print('    sonder les colonnes des pays retenus (microdonnee dans C:\\tmp uniquement).')
+    print('    sonder les colonnes des pays retenus avec wgss_probe.py (dossier temporaire,')
+    print('    supprime a la fin : la microdonnee ne reste jamais sur disque).')
 
     if all_rows:
         out = os.path.join(HERE, '..', 'analysis',
@@ -267,7 +281,7 @@ def main(argv):
         save_csv(all_rows, out)
         print()
         print('  ecrit : {}'.format(os.path.abspath(out)))
-    return 0
+    return 1 if incomplete else 0
 
 
 if __name__ == '__main__':

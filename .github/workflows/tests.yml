@@ -1,0 +1,41 @@
+name: tests
+
+# The offline suite only: it makes no request outside the machine, so it is fast,
+# deterministic, and a red run always means the code, never a provider's uptime.
+# The live suites (dtm, p0, skill50) depend on other people's APIs and keys:
+# run them by hand, or from a session that has network access and the keys.
+on:
+  push:
+  pull_request:
+
+permissions:
+  contents: read
+
+jobs:
+  offline:
+    runs-on: ${{ matrix.os }}
+    strategy:
+      fail-fast: false
+      matrix:
+        os: [ubuntu-latest, windows-latest]
+        python: ['3.9', '3.12']
+    steps:
+      - uses: actions/checkout@v4
+      - uses: actions/setup-python@v5
+        with:
+          python-version: ${{ matrix.python }}
+      - name: Offline suite (standard library only, no network)
+        run: python -X utf8 scripts/run_tests.py hard
+
+  lint:
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v4
+      - uses: actions/setup-python@v5
+        with:
+          python-version: '3.12'
+      - run: python -m pip install pyflakes vermin
+      - name: pyflakes
+        run: python -m pyflakes 01_fetch.py 01b_download.py scripts examples
+      - name: Python 3.8+ compatibility (the README's floor)
+        run: vermin --no-tips --violations -t=3.8- 01_fetch.py 01b_download.py scripts examples

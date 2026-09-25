@@ -7,8 +7,12 @@ fetch_country_data.py). Classifies each source and writes a durable report.
 Semantics:
   GREEN  = HTTP call returned AND client parsed it AND >=1 record on the test country
   YELLOW = call succeeded but 0 records (suspicious: test country is data-rich)
-  RED    = exception / non-2xx (status code or exception text captured)
-  SKIP   = missing free credential (config gap, not a broken API) or no country id
+  RED    = exception / non-2xx (status code or exception text captured), including
+           an outage: clients raise SourceUnavailable instead of returning []
+  SKIP   = missing free credential (config gap, not a broken API), or the source
+           does not cover the test country
+
+Exit status: 1 when any source is RED, 0 otherwise, 2 for an invalid country code.
 
 A probe = ONE underlying HTTP call. It does NOT reproduce fetch_*'s full fan-out
 (e.g. HAPI here only hits data-availability, not the ~10 data endpoints).
@@ -19,7 +23,8 @@ Usage:
     python -X utf8 health_check.py SYR
 """
 import sys
-sys.stdout.reconfigure(encoding='utf-8')
+if hasattr(sys.stdout, 'reconfigure'):   # absent in Jupyter, IDLE, captured output
+    sys.stdout.reconfigure(encoding='utf-8')
 
 import os
 import io
@@ -31,7 +36,12 @@ SCRIPT_DIR = os.path.dirname(os.path.abspath(__file__))
 PROJECT_DIR = os.path.dirname(SCRIPT_DIR)
 sys.path.insert(0, os.path.join(SCRIPT_DIR, 'clients'))
 
-COUNTRY = (sys.argv[1].upper() if len(sys.argv) > 1 else 'SDN')
+from config import normalize_iso3, MissingCredential, NotCovered  # noqa: E402
+try:
+    COUNTRY = normalize_iso3(sys.argv[1] if len(sys.argv) > 1 else 'SDN')
+except ValueError as _e:
+    print(_e)
+    sys.exit(2)
 COUNTRY_NAMES = {
     'SDN': 'Sudan', 'SYR': 'Syria', 'YEM': 'Yemen', 'LBN': 'Lebanon',
     'AFG': 'Afghanistan', 'UKR': 'Ukraine', 'COD': 'Congo', 'PSE': 'Palestine',
@@ -46,13 +56,8 @@ _year = datetime.now().year
 
 # ─── Detect missing free credentials (keyring or env) ──────────────
 def _cred(service, field, envvar):
-    try:
-        import keyring
-        if keyring.get_password(service, field):
-            return True
-    except Exception:
-        pass
-    return bool(os.environ.get(envvar))
+    from config import get_credential      # tolerates a broken keychain backend
+    return bool(get_credential(service, field, envvar))
 
 
 KEYLESS_MISSING = set()
@@ -151,12 +156,11 @@ def p_impact():
     return res.get('total', 0), 'REACH resources total'
 
 def p_dtm_portal():
-    from dtm_client import DTMClient, PORTAL_COUNTRY_IDS
-    cid = PORTAL_COUNTRY_IDS.get(COUNTRY)
-    if not cid:
-        raise _NoCountryId('no DTM portal id for {}'.format(COUNTRY))
-    res = DTMClient().search_portal_datasets(country_id=cid)
-    return len(res.get('datasets', [])), 'portal datasets'
+    # Same call as fetch_country_data.fetch_dtm_portal (it used a legacy search
+    # that the pipeline no longer runs). UnmappedCountry is a NotCovered -> SKIP.
+    from dtm_client import DTMClient
+    rows = DTMClient().browse_catalogue(COUNTRY, max_pages=1)
+    return len(rows), 'portal datasets (first page)'
 
 def p_liveuamap():
     # 30-day window: low-volume feeds (e.g. sudan, ~2 events/week) legitimately
@@ -232,20 +236,25 @@ def run():
         ms = (time.time() - t) * 1000
 
         if err is not None:
-            if key in KEYLESS_MISSING:
+            if isinstance(err, MissingCredential) or key in KEYLESS_MISSING:
                 status = 'SKIP'
                 detail = 'needs free key ({})'.format(_err_short(err))
-            elif isinstance(err, _NoCountryId):
+            elif isinstance(err, (_NoCountryId, NotCovered)):
                 status = 'SKIP'
-                detail = str(err)
+                detail = 'not covered: {}'.format(str(err)[:90])
             else:
                 status = 'RED'
                 detail = _err_short(err)
         else:
             if key in KEYLESS_MISSING:
-                # unexpected success without a configured key
-                status = 'GREEN' if count > 0 else 'YELLOW'
-                detail = (detail + ' [public endpoint]').strip()
+                # Without its key a client makes no call: only real rows prove
+                # that the endpoint is public. Zero rows is a skip, not a warning.
+                if count > 0:
+                    status = 'GREEN'
+                    detail = (detail + ' [public endpoint]').strip()
+                else:
+                    status = 'SKIP'
+                    detail = 'needs free key (no data without it)'
             elif count > 0:
                 status = 'GREEN'
             else:
@@ -299,4 +308,5 @@ def _write_report(results, tally):
 
 
 if __name__ == '__main__':
-    run()
+    _results = run()
+    sys.exit(1 if any(r[2] == 'RED' for r in _results) else 0)

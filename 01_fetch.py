@@ -1,7 +1,8 @@
 """
 01_fetch.py — Fetch humanitarian secondary data for a country
 ==============================================================
-Queries multiple APIs and writes CSVs to data/{ISO3}/.
+Queries multiple APIs and writes CSVs to {ISO3}_data/ (raw/ and catalogue/), with
+fetch_summary.csv (one status per source) and data_inventory.csv (one row per file).
 
 Usage:
     python -X utf8 01_fetch.py UKR                                    # all sources
@@ -9,6 +10,8 @@ Usage:
     python -X utf8 01_fetch.py SDN --date-from 2025-01-01             # with date filter
     python -X utf8 01_fetch.py SYR --only liveuamap --max-pages 50    # limit pagination
     python -X utf8 01_fetch.py IRN --date-from 2026-03-01 --date-to 2026-03-31
+
+Exit status is the engine's: 0 all sources answered, 1 some failed, 2 bad arguments.
 
 Next step: python -X utf8 01b_download.py --select
 """
@@ -19,5 +22,6 @@ import subprocess
 HERE = os.path.dirname(os.path.abspath(__file__))
 FETCH = os.path.join(HERE, 'scripts', 'fetch_country_data.py')
 
-# Pass all arguments through to fetch_country_data.py
-subprocess.run([sys.executable, '-X', 'utf8', FETCH] + sys.argv[1:])
+# Pass all arguments through to fetch_country_data.py, and its exit status back:
+# a shell loop, a CI step or an agent must see a failed run as failed.
+sys.exit(subprocess.run([sys.executable, '-X', 'utf8', FETCH] + sys.argv[1:]).returncode)

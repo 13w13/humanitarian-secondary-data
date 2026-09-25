@@ -12,14 +12,16 @@ Usage:
     profile = wb.get_country_profile('LBN')
 """
 import sys
-sys.stdout.reconfigure(encoding='utf-8')
+if hasattr(sys.stdout, 'reconfigure'):   # absent in Jupyter, IDLE, captured output
+    sys.stdout.reconfigure(encoding='utf-8')
 
 import json
 from urllib.request import Request, urlopen
 from urllib.parse import urlencode
 
 from config import (
-    WORLDBANK_BASE as WB_BASE, DEFAULT_TIMEOUT, USER_AGENT, save_csv
+    WORLDBANK_BASE as WB_BASE, DEFAULT_TIMEOUT, USER_AGENT, save_csv,
+    raise_unavailable
 )
 
 
@@ -41,8 +43,10 @@ class WorldBankClient:
         'SP.URB.TOTL.IN.ZS': 'Urban population (%)',
         'SL.UEM.TOTL.ZS': 'Unemployment (%)',
         'FP.CPI.TOTL.ZG': 'Inflation (CPI, annual %)',
-        'SM.POP.REFG': 'Refugee population by country of asylum',
-        'SM.POP.REFG.OR': 'Refugee population by country of origin',
+        # SM.POP.REFG and SM.POP.REFG.OR (refugees by asylum / origin) moved to
+        # the "WDI Database Archives" and no longer serve data (checked
+        # 2026-09-25): every profile came out partial. Refugee figures come
+        # from UNHCR itself, see unhcr_client.
     }
 
     def __init__(self):
@@ -133,11 +137,15 @@ class WorldBankClient:
             data = self._get('country/{}/indicator/{}'.format(iso3.upper(), indicator_id),
                              {'mrnev': '1'})
         except Exception as e:
-            print('  World Bank {}: {}'.format(indicator_id, str(e)[:70]))
-            return None
+            # Returned None before: an outage then read as "no value for this
+            # indicator" and the indicator vanished from the profile.
+            raise_unavailable('World Bank {}'.format(indicator_id), e)
         if isinstance(data, list) and data and isinstance(data[0], dict) \
                 and 'message' in data[0]:
-            return None
+            msgs = data[0].get('message') or [{}]
+            raise ValueError('World Bank a repondu une ERREUR en HTTP 200 pour '
+                             '{}/{} : {}'.format(iso3, indicator_id,
+                                                 str(msgs[0].get('value'))[:110]))
         for item in data or []:
             if item.get('value') is not None:
                 return {
@@ -157,6 +165,9 @@ class WorldBankClient:
         base sur `year_from` rendait alors "indicateur indisponible" a tort.
         """
         records = []
+        # Indicators that failed, so a caller can report a partial profile instead
+        # of a shorter one that looks complete.
+        self.last_failures = []
         for ind_id, ind_name in self.KEY_INDICATORS.items():
             try:
                 if use_mrnev:
@@ -188,6 +199,7 @@ class WorldBankClient:
                 # On DIT quel indicateur a echoue : un `pass` muet a fait croire
                 # pendant des mois que la Banque mondiale n'avait aucun indicateur
                 # handicap, alors qu'elle en expose 1 333.
+                self.last_failures.append((ind_id, e))
                 print('  World Bank {} indisponible pour {} : {}'.format(
                     ind_id, iso3.upper(), str(e)[:70]))
         return records
@@ -201,6 +213,11 @@ class WorldBankClient:
         if not data:
             return {}
         c = data[0] if isinstance(data, list) else data
+        if isinstance(c, dict) and 'message' in c:
+            # An error answered in HTTP 200 used to become a dict of empty strings
+            # (and a GREEN health check).
+            raise ValueError('World Bank a repondu une ERREUR en HTTP 200 pour {} : {}'
+                             .format(iso3, str((c.get('message') or [{}])[0])[:110]))
         return {
             'iso3': c.get('id', ''),
             'name': c.get('name', ''),
