@@ -434,11 +434,40 @@ def t_golden_sentences():
           _change_value('decreased by 120,233 to 8,685,273 IDPs', 8685273) == 120233)
 
 
+def t_period_filter():
+    section(11, 'filtre de periode : chevauchement, et un zero qui dit pourquoi')
+    # Constat du run reel Soudan du 2026-09-25, --date-from 2026-08-01 : le HNO
+    # 2026 (01-01 -> 12-31) etait ecarte parce qu'il COMMENCE avant la fenetre, et
+    # le resume disait "no disability disaggregation" alors que 6 515 lignes
+    # handicap existaient hors fenetre.
+    from fetch_country_data import filter_by_period
+    rows = [
+        {'date_start': '2026-01-01', 'date_end': '2026-12-31', 'category': 'total'},
+        {'date_start': '2025-01-01', 'date_end': '2025-12-08', 'category': 'Disability'},
+        {'date_start': '2026-06-30', 'date_end': '2026-06-30'},     # round DTM
+        {'date_start': '2026-09-01', 'date_end': ''},               # prix du mois
+        {'date_start': '', 'date_end': ''},                         # sans date
+    ]
+    kept, outside = filter_by_period(rows, '2026-08-01')
+    check('le HNO annuel en cours est garde', rows[0] in kept)
+    check('une ligne sans date est gardee', rows[4] in kept)
+    check('une date de debut seule suffit', rows[3] in kept)
+    check('ce qui finit avant la fenetre est ecarte',
+          rows[1] not in kept and rows[2] not in kept, '{} gardees'.format(len(kept)))
+    check('le zero dit ce qui existe hors fenetre',
+          outside == '2 outside the period, covering 2025-01-01 to 2026-06-30', outside)
+    kept, outside = filter_by_period(rows, None, '2025-12-31')
+    check('--date-to seul ecarte ce qui commence apres',
+          len(kept) == 2 and outside.startswith('3 outside'), outside)
+    kept, outside = filter_by_period(rows)
+    check('sans periode : tout est garde, aucune note', len(kept) == len(rows) and not outside)
+
+
 def main():
     for fn in (t_iso3, t_credentials, t_require_module, t_downloader,
                t_no_unguarded_optional_import, t_core_imports_bare,
                t_outage_taxonomy, t_outage_is_never_zero, t_downloader_behaviour,
-               t_golden_sentences):
+               t_golden_sentences, t_period_filter):
         try:
             fn()
         except Exception as e:

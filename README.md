@@ -154,6 +154,11 @@ zero.
 Each source applies the period its own way (HPC reads the year of `--date-from`,
 GDACS looks back from today, and HDX, INFORM, WFP, World Bank, ACAPS, DTM, IFRC and
 IMPACT ignore it); the help text of `fetch_country_data.py` lists which ones use it.
+HAPI keeps every row whose reference period overlaps the window, so the yearly HNO
+counts in August, and a zero says what exists outside it:
+`IDPs: 0 records (19741 outside the period, covering 2010-06-30 to 2026-06-30)`.
+UNHCR publishes yearly: a window inside a year it has not published yet returns no
+population figures, and the summary says so.
 
 ```bash
 # All sources for Sudan

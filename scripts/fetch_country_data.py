@@ -108,6 +108,32 @@ def _extract_date_range(records, date_field='date_start'):
     return min(dates), max(dates)
 
 
+def filter_by_period(records, date_from=None, date_to=None):
+    """Keep the records whose reference period OVERLAPS [date_from, date_to].
+
+    Returns (kept, outside), `outside` being '' or a note on what was left out,
+    so a zero is printed with its reason. HAPI rows carry date_start/date_end: a
+    yearly HNO runs 2026-01-01 -> 2026-12-31 and is current in August. Testing
+    date_start alone dropped it, and a Sudan run from 2026-08-01 then reported
+    "no disability disaggregation" while 6,515 such rows sat outside the window.
+    Rows without any date are kept.
+    """
+    if not date_from and not date_to:
+        return list(records), ''
+    kept, left_out = [], []
+    for r in records:
+        start = str(r.get('date_start') or '')[:10]
+        end = str(r.get('date_end') or '')[:10] or start
+        if (date_from and end and end < date_from) or (date_to and start and start > date_to):
+            left_out.append((start or end, end))
+        else:
+            kept.append(r)
+    if not left_out:
+        return kept, ''
+    return kept, '{} outside the period, covering {} to {}'.format(
+        len(left_out), min(s for s, _ in left_out), max(e for _, e in left_out))
+
+
 # ─── Per-source outcome ─────────────────────────────────────
 # A source ends in exactly one of these states, written to fetch_summary.csv.
 # Only `ok` and `empty` are answers from the provider; every other state means
@@ -399,32 +425,24 @@ def fetch_hapi(iso3, output_dir, date_from=None, date_to=None):
     if date_from:
         print('  Period filter: {} -> {}'.format(date_from, date_to or 'now'))
 
-    def _filter_by_period(records, date_field='date_start'):
-        """Post-fetch filter for analytical data within the period."""
-        if not date_from:
-            return records
-        filtered = []
-        for r in records:
-            d = str(r.get(date_field, '') or '')[:10]
-            if not d:
-                filtered.append(r)  # Keep records with no date
-                continue
-            if date_from and d < date_from:
-                continue
-            if date_to and d > date_to:
-                continue
-            filtered.append(r)
-        return filtered
+    summary_parts = []
+
+    def _in_period(label, records):
+        """Filter analytical rows to the period and say what a zero means."""
+        kept, outside = filter_by_period(records, date_from, date_to)
+        print('  {}: {} records{}'.format(
+            label, len(kept), ' ({})'.format(outside) if outside else ''))
+        if outside and not kept:
+            summary_parts.append('no {} in period ({})'.format(label, outside))
+        return kept
 
     avail = hapi.get_data_availability(iso3)
     print('  Data available ({}/13): {}'.format(len(avail), ', '.join(avail)))
-    summary_parts = []
     total = 0
 
     # --- ANALYTICAL endpoints (filtered by period) ---
 
-    idps = _filter_by_period(hapi.get_idps(iso3))
-    print('  IDPs: {} records'.format(len(idps)))
+    idps = _in_period('IDPs', hapi.get_idps(iso3))
     if idps:
         save_csv(idps, os.path.join(output_dir, 'hapi_idps.csv'),
                  ['location_code', 'admin1_name', 'admin2_name', 'date_start', 'date_end', 'population'])
@@ -470,8 +488,7 @@ def fetch_hapi(iso3, output_dir, date_from=None, date_to=None):
     # --- ANALYTICAL endpoints (filtered by period) ---
 
     if 'conflict-events' in avail:
-        conflict = _filter_by_period(hapi.get_conflict_events(iso3))
-        print('  Conflict Events: {} records'.format(len(conflict)))
+        conflict = _in_period('Conflict Events', hapi.get_conflict_events(iso3))
         if conflict:
             save_csv(conflict, os.path.join(output_dir, 'hapi_conflict_events.csv'),
                      ['location_code', 'admin1_name', 'admin2_name', 'event_type',
@@ -482,8 +499,7 @@ def fetch_hapi(iso3, output_dir, date_from=None, date_to=None):
             all_dates.extend(r.get('date_start', '') for r in conflict)
 
     if 'refugees-persons-of-concern' in avail:
-        refugees = _filter_by_period(hapi.get_refugees(iso3))
-        print('  Refugees/PoC: {} records'.format(len(refugees)))
+        refugees = _in_period('Refugees/PoC', hapi.get_refugees(iso3))
         if refugees:
             save_csv(refugees, os.path.join(output_dir, 'hapi_refugees.csv'),
                      ['asylum_location', 'origin_location', 'origin_name',
@@ -495,8 +511,7 @@ def fetch_hapi(iso3, output_dir, date_from=None, date_to=None):
             all_dates.extend(r.get('date_start', '') for r in refugees)
 
     if 'food-security' in avail:
-        food_sec = _filter_by_period(hapi.get_food_security(iso3))
-        print('  Food Security: {} records'.format(len(food_sec)))
+        food_sec = _in_period('Food Security', hapi.get_food_security(iso3))
         if food_sec:
             save_csv(food_sec, os.path.join(output_dir, 'hapi_food_security.csv'),
                      ['location_code', 'admin1_name', 'admin2_name', 'ipc_phase',
@@ -508,8 +523,7 @@ def fetch_hapi(iso3, output_dir, date_from=None, date_to=None):
             all_dates.extend(r.get('date_start', '') for r in food_sec)
 
     if 'food-prices-market-monitor' in avail:
-        prices = _filter_by_period(hapi.get_food_prices(iso3))
-        print('  Food Prices: {} records'.format(len(prices)))
+        prices = _in_period('Food Prices', hapi.get_food_prices(iso3))
         if prices:
             save_csv(prices, os.path.join(output_dir, 'hapi_food_prices.csv'),
                      ['location_code', 'admin1_name', 'market_name', 'commodity_name',
@@ -534,9 +548,13 @@ def fetch_hapi(iso3, output_dir, date_from=None, date_to=None):
     # Humanitarian Needs - KEY FOR HI: v2 `category` field carries ALL
     # disaggregation, including category='Disability' (see hapi_client docstring)
     disability_records = 0
+    disability_outside = ''   # disability rows exist, but not in the period
     if 'humanitarian-needs' in avail:
-        hum_needs = _filter_by_period(hapi.get_humanitarian_needs(iso3))
-        print('  Humanitarian Needs: {} records'.format(len(hum_needs)))
+        all_needs = hapi.get_humanitarian_needs(iso3)
+        hum_needs = _in_period('Humanitarian Needs', all_needs)
+        _, disability_outside = filter_by_period(
+            [r for r in all_needs if 'disab' in (r.get('category') or '').lower()],
+            date_from, date_to)
         if hum_needs:
             save_csv(hum_needs, os.path.join(output_dir, 'hapi_humanitarian_needs.csv'),
                      ['location_code', 'admin1_name', 'admin2_name', 'admin_level',
@@ -557,16 +575,18 @@ def fetch_hapi(iso3, output_dir, date_from=None, date_to=None):
                 print('  ** DISABILITY: {} rows with category=Disability '
                       '(in-need pop {:,} across periods - dedupe by period before use)'.format(
                           len(disabled_rows), disabled_inn))
-            else:
-                print('  ** No disability-disaggregated records found')
+        if not disability_records:
+            print('  ** No disability-disaggregated records {}'.format(
+                'in the period ({})'.format(disability_outside) if disability_outside
+                else 'found'))
 
     if 'returnees' in avail:
         # returnees = a FLOW origin x asylum, not a country stock. We ask for
         # people returning TO iso3 (origin_location_code). The previous code
         # filtered on location_code, which is not a parameter of this endpoint,
         # and therefore collected the whole world and summed it.
-        returnees = _filter_by_period(hapi.get_returnees(iso3, direction='origin'))
-        print('  Returnees (to {}): {} records'.format(iso3, len(returnees)))
+        returnees = _in_period('Returnees (to {})'.format(iso3),
+                               hapi.get_returnees(iso3, direction='origin'))
         if returnees:
             save_csv(returnees, os.path.join(output_dir, 'hapi_returnees.csv'),
                      ['origin_location_code', 'origin_location_name',
@@ -581,8 +601,7 @@ def fetch_hapi(iso3, output_dir, date_from=None, date_to=None):
             all_dates.extend(r.get('date_start', '') for r in returnees)
 
     if 'rainfall' in avail:
-        rainfall = _filter_by_period(hapi.get_rainfall(iso3))
-        print('  Rainfall: {} records'.format(len(rainfall)))
+        rainfall = _in_period('Rainfall', hapi.get_rainfall(iso3))
         if rainfall:
             save_csv(rainfall, os.path.join(output_dir, 'hapi_rainfall.csv'),
                      ['location_code', 'admin1_name', 'admin2_name',
@@ -598,6 +617,9 @@ def fetch_hapi(iso3, output_dir, date_from=None, date_to=None):
         disability_note = ' | ** {} disability-disaggregated records **'.format(disability_records)
     elif 'humanitarian-needs' not in avail:
         disability_note = ' | humanitarian-needs not available'
+    elif disability_outside:
+        disability_note = (' | disability-disaggregated needs exist, none in the period '
+                           '({})'.format(disability_outside))
     else:
         disability_note = ' | humanitarian-needs available but no disability disaggregation'
 
@@ -803,13 +825,23 @@ def fetch_unhcr(iso3, output_dir, date_from=None):
     p_from = min(years) if years else ''
     p_to = max(years) if years else ''
 
+    note = '{} population records, {} solutions'.format(len(pop), len(solutions))
+    if date_from and not pop and not pop_origin:
+        # Yearly statistics: from 2026-08-01 means year 2026, which UNHCR may not
+        # have published yet. Sudan came out as "0 population records".
+        hint = ('no population figures for {0} onward: UNHCR publishes yearly, the '
+                'latest year may be earlier; rerun with --date-from {1}-01-01'
+                .format(year_from, year_from - 1))
+        print('  ({})'.format(hint))
+        note += ' | ' + hint
+
     return _make_result(
         source='UNHCR', category='raw',
         total_records=total,
         disability_records=0,
         period_from=p_from, period_to=p_to,
         files=files,
-        note='{} population records, {} solutions'.format(len(pop), len(solutions)),
+        note=note,
     )
 
 

@@ -43,8 +43,10 @@ class WorldBankClient:
         'SP.URB.TOTL.IN.ZS': 'Urban population (%)',
         'SL.UEM.TOTL.ZS': 'Unemployment (%)',
         'FP.CPI.TOTL.ZG': 'Inflation (CPI, annual %)',
-        'SM.POP.REFG': 'Refugee population by country of asylum',
-        'SM.POP.REFG.OR': 'Refugee population by country of origin',
+        # SM.POP.REFG and SM.POP.REFG.OR (refugees by asylum / origin) moved to
+        # the "WDI Database Archives" and no longer serve data (checked
+        # 2026-09-25): every profile came out partial. Refugee figures come
+        # from UNHCR itself, see unhcr_client.
     }
 
     def __init__(self):
