@@ -143,7 +143,7 @@ def t_no_unguarded_optional_import():
     # d'un constructeur. Le README promet « no pip install » : cette assertion tient
     # la promesse dans le temps, ce qu'une relecture ne fait pas.
     OPTIONAL = ('keyring', 'openpyxl', 'matplotlib', 'fitz', 'pymupdf',
-                'pandas', 'numpy', 'requests')
+                'pandas', 'numpy', 'requests', 'rasterio', 'tifffile')
     offenders = []
     for root, _, files in os.walk(HERE):
         if '__pycache__' in root:
@@ -182,12 +182,12 @@ def t_no_unguarded_optional_import():
 
 # ── 6 : le core s'importe vraiment sans les extras ────────────
 def t_core_imports_bare():
-    section(6, 'les 16 clients s\'importent sans aucun extra installe')
+    section(6, 'les clients s\'importent sans aucun extra installe')
     import builtins
     import importlib
     real = builtins.__import__
     blocked = ('keyring', 'openpyxl', 'matplotlib', 'fitz', 'pandas', 'numpy',
-               'requests')
+               'requests', 'rasterio', 'tifffile')
 
     def bare(name, *a, **k):
         if name.split('.')[0] in blocked:

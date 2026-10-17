@@ -35,6 +35,9 @@ health_check*.md
 *_ACCESS.md
 *_FINDINGS.md
 NOTES_*.md
+# Rasters (WorldPop: 54 MB for one country-year at 100 m)
+*.tif
+*.tiff
 C_tmp/
 # test reports written next to the scripts
 scripts/skill_50_results.md

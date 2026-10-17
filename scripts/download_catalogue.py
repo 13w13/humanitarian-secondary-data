@@ -60,6 +60,7 @@ URL_COLUMNS = {
     # (`url` est la fiche). Sans ce mapping, _detect_url_column prenait `url`
     # en premier et tout le catalogue passait pour non telechargeable.
     'dtm_portal_datasets.csv': 'download_url',
+    'worldpop_files.csv': 'download_url',
     'reliefweb_disability.csv': 'url',
 }
 
@@ -105,7 +106,7 @@ def _is_downloadable(url):
     # Heuristic: URL ends with a file extension
     path = url.split('?')[0].split('#')[0]
     ext = path.rsplit('.', 1)[-1].lower() if '.' in path else ''
-    return ext in ('xlsx', 'xls', 'csv', 'zip', 'pdf', 'json', 'geojson')
+    return ext in ('xlsx', 'xls', 'csv', 'zip', 'pdf', 'json', 'geojson', 'tif', 'tiff')
 
 
 def _safe_filename(url):

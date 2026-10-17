@@ -69,6 +69,12 @@ HPC_BASE = 'https://api.hpc.tools/v1/public'
 IFRCGO_BASE = 'https://goadmin.ifrc.org/api/v2'
 # Public for core endpoints. Emergencies, appeals, field reports, 3W projects
 
+# ─── WorldPop ────────────────────────────────────────────
+WORLDPOP_BASE = 'https://hub.worldpop.org/rest/data'
+WORLDPOP_RELEASE = 'R2025A'
+# Public, no auth, CC BY 4.0. Gridded population (GeoTIFF), 100 m and 1 km,
+# annual 2015-2030, total and age/sex. Files on data.worldpop.org.
+
 # ─── API Keys — keyring (preferred) or env vars ─────────
 # Convention: keyring service = sds.{provider}, username = field name
 #
@@ -205,6 +211,10 @@ def sniff_mismatch(first_bytes, path):
         return 'not a zip container, so not a valid {} file'.format(ext)
     if ext == '.pdf' and not first_bytes.startswith(b'%PDF'):
         return 'not a PDF'
+    # GeoTIFF (WorldPop): classic or BigTIFF, either byte order.
+    if ext in ('.tif', '.tiff') and first_bytes[:4] not in (
+            b'II*\x00', b'MM\x00*', b'II+\x00', b'MM\x00+'):
+        return 'not a TIFF'
     return None
 _FILENAME_BAD = re.compile(r'[^A-Za-z0-9._ ()-]+')
 

@@ -1,7 +1,7 @@
 """
 Health Check - Secondary Data Sources
 =====================================
-One minimal, side-effect-free probe per source (17 dispatch keys, mirrors
+One minimal, side-effect-free probe per source (one per dispatch key, mirrors
 fetch_country_data.py). Classifies each source and writes a durable report.
 
 Semantics:
@@ -169,6 +169,12 @@ def p_liveuamap():
     ev = LiveuamapClient().get_events(COUNTRY, max_pages=1, date_from=_d30)
     return len(ev), 'events (1 page, since {})'.format(_d30)
 
+def p_worldpop():
+    # NotCovered (no file for the country) -> SKIP, an outage -> RED.
+    from worldpop_client import WorldPopClient
+    rows = WorldPopClient().list_files(COUNTRY)
+    return len(rows), 'R2025A 100 m files (one per year)'
+
 
 class _NoCountryId(Exception):
     pass
@@ -183,7 +189,7 @@ class _Quiet(io.StringIO):
         return self
 
 
-# key, display, fn  - mirrors the 17 dispatch keys of fetch_country_data.py
+# key, display, fn  - mirrors the dispatch keys of fetch_country_data.py
 PROBES = [
     ('reliefweb', 'ReliefWeb', p_reliefweb),
     ('hapi', 'HDX HAPI', p_hapi),
@@ -202,6 +208,7 @@ PROBES = [
     ('impact', 'IMPACT/REACH', p_impact),
     ('dtm_portal', 'DTM Portal', p_dtm_portal),
     ('liveuamap', 'Liveuamap', p_liveuamap),
+    ('worldpop', 'WorldPop', p_worldpop),
 ]
 
 STATUS_ICON = {'GREEN': 'OK  ', 'YELLOW': 'WARN', 'RED': 'FAIL', 'SKIP': 'SKIP'}

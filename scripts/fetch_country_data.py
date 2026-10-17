@@ -49,7 +49,7 @@ ALL_SOURCES = [
     'reliefweb', 'hapi', 'hdx', 'idmc', 'unhcr', 'inform',
     'wfp', 'worldbank', 'acled', 'acaps', 'dtm',
     'gdacs', 'hpc', 'ifrcgo', 'impact', 'dtm_portal',
-    'liveuamap',
+    'liveuamap', 'worldpop',
 ]
 
 SCRIPT_DIR = os.path.dirname(os.path.abspath(__file__))
@@ -74,6 +74,7 @@ SOURCE_CATEGORIES = {
     'impact': 'catalogue',
     'dtm_portal': 'catalogue',
     'liveuamap': 'raw',
+    'worldpop': 'catalogue',   # GeoTIFF listing; the rasters are downloaded on demand
 }
 
 CATALOGUE_SOURCES = {k for k, v in SOURCE_CATEGORIES.items() if v == 'catalogue'}
@@ -92,6 +93,7 @@ SOURCE_DISPLAY_NAMES = {
     'hpc': 'HPC/FTS', 'ifrcgo': 'IFRC Go', 'impact': 'IMPACT/REACH',
     'dtm_portal': 'DTM Portal',
     'liveuamap': 'Liveuamap',
+    'worldpop': 'WorldPop',
 }
 
 
@@ -285,6 +287,7 @@ SOURCE_FILES = {
     'impact': ['impact_all_resources.csv', 'impact_msna_datasets.csv'],
     'dtm_portal': ['dtm_portal_datasets.csv'],
     'liveuamap': ['liveuamap_events.csv'],
+    'worldpop': ['worldpop_files.csv'],
 }
 FILE_OWNER = {f: src for src, names in SOURCE_FILES.items() for f in names}
 
@@ -1402,6 +1405,46 @@ def fetch_liveuamap(iso3, output_dir, date_from=None, date_to=None, max_pages=20
     )
 
 
+def fetch_worldpop(iso3, output_dir):
+    """List WorldPop R2025A gridded population files (100 m and 1 km, 2015-2030).
+
+    Catalogue only: one row per GeoTIFF with its direct link, licence and DOI.
+    Nothing is downloaded here (54 MB per year at 100 m for Sudan); pick files with
+    `01b_download.py`, or `WorldPopClient.download`. Age/sex files (62 per year)
+    stay out of this listing: `WorldPopClient().list_files(iso3, 'age_sex')`.
+    Every year is modelled, and the layer does not see displacement (CAVEATS).
+    """
+    from worldpop_client import WorldPopClient, CAVEATS
+    wp = WorldPopClient()
+    errors = []
+    print('\n--- WorldPop (gridded population) ---')
+    rows = []
+    for res in ('100m', '1km'):
+        # NotCovered ends the source as `not_covered`, an outage as `unavailable`.
+        got = _attempt(errors, 'WorldPop {}'.format(res), wp.list_files, iso3,
+                       product='population', resolution=res)
+        rows += got or []
+    files = []
+    if rows:
+        save_csv(rows, os.path.join(output_dir, 'worldpop_files.csv'),
+                 ['iso3', 'product', 'resolution', 'release', 'year', 'published',
+                  'file_name', 'download_url', 'doi', 'license', 'citation'])
+        files.append('worldpop_files.csv')
+    years = sorted({r['year'] for r in rows})
+    if rows:
+        print('  {} files, years {}-{}'.format(len(rows), years[0], years[-1]))
+    return _make_result(
+        source='WorldPop', category='catalogue',
+        total_records=len(rows), disability_records=0, files=files,
+        period_from=str(years[0]) if years else '',
+        period_to=str(years[-1]) if years else '',
+        last_update=rows[0]['published'] if rows else '',
+        note='{} GeoTIFF; modelled years, not observed. {}'.format(
+            len(rows), CAVEATS[1]),
+        errors=errors,
+    )
+
+
 def _iso_date(value):
     """argparse type: a YYYY-MM-DD date, kept as the string the clients expect.
 
@@ -1529,6 +1572,7 @@ def main():
         'impact': lambda: fetch_impact(iso3, catalogue_dir),
         'dtm_portal': lambda: fetch_dtm_portal(iso3, catalogue_dir),
         'liveuamap': lambda: fetch_liveuamap(iso3, output_dir, df, dt, mp),
+        'worldpop': lambda: fetch_worldpop(iso3, catalogue_dir),
     }
 
     for source in sources:

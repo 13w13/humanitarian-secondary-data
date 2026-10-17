@@ -52,10 +52,10 @@ Try `SDN` (data is open, 8.7M IDPs cited from a 35-page PDF) or `PSE` (no DTM co
 ### Then: fetch, download, analyse
 
 ```bash
-python -X utf8 scripts/health_check.py SDN         # are the 17 sources reachable?
+python -X utf8 scripts/health_check.py SDN         # is each source reachable?
 python -X utf8 scripts/fetch_country_data.py SDN   # pull everything to CSV
 python -X utf8 scripts/run_tests.py hard           # 71 assertions, offline, ~2 s
-python -X utf8 scripts/run_tests.py                # hard + dtm + p0, no pytest needed
+python -X utf8 scripts/run_tests.py                # hard + dtm + p0 + worldpop, no pytest needed
 python -X utf8 scripts/run_tests.py skill50        # 50 end-to-end scenarios (~4 min)
 ```
 
@@ -89,7 +89,7 @@ so a shell loop, a CI step or an agent can tell a complete run from an incomplet
 Python 3.8+. **Fetching data needs nothing but the standard library**, so the toolkit
 runs on a locked-down machine with no `pip install`.
 
-Four features reach beyond the standard library. Each imports its dependency only
+Five features reach beyond the standard library. Each imports its dependency only
 when you call it, so a missing package disables that one feature and nothing else,
 and it says so rather than raising a traceback.
 
@@ -99,9 +99,10 @@ and it says so rather than raising a traceback.
 | Read a downloaded workbook | `openpyxl` | Fetching and cataloguing still work |
 | Read a report PDF | `pymupdf` | Report body text is used when available |
 | Draw a chart | `matplotlib` | Figures are still returned as text |
+| Sum a population raster around a site | `rasterio` | Listing and downloading the GeoTIFFs still work |
 
 ```bash
-pip install keyring openpyxl pymupdf matplotlib    # only if you want all four
+pip install keyring openpyxl pymupdf matplotlib rasterio    # only if you want all five
 ```
 
 Some sources need a free key: ReliefWeb (a pre-approved appname), ACLED, ACAPS, IDMC
@@ -133,6 +134,7 @@ The first argument is an **ISO 3166-1 alpha-3 country code** (e.g. `SDN`, `UKR`,
 | **IFRC Go** | Countries with IFRC operations |
 | **DTM/IOM** | Countries with displacement tracking |
 | **ReliefWeb** | Any country with reports filed |
+| **WorldPop** | All countries and territories (Global 2, release R2025A) |
 
 If a source has no data for the given country, its status says which case it is:
 `empty` (it answered with nothing), `not_covered` (it has no coverage for this
@@ -185,20 +187,21 @@ python -X utf8 01b_download.py --dry-run
 
 scripts/
 ├── explore.py                     # → START HERE: orient yourself on a country
-├── health_check.py                # are the 17 sources reachable right now?
+├── health_check.py                # is each source reachable right now?
 ├── fetch_country_data.py          # engine: all sources → CSVs
 ├── download_catalogue.py          # engine: catalogue → downloaded files
 ├── quick_chart.py                 # a downloaded DTM file → a PNG chart
 ├── msna_census.py                 # locate MSNA products across three channels
 ├── wgss_probe.py                  # read a workbook's column names, never its values
-├── run_tests.py                   # test runner (four suites, stdlib only)
+├── run_tests.py                   # test runner (stdlib only, `--list` for the suites)
 ├── test_hardening.py              # the offline suite: run this one first
 └── clients/
     ├── recipes.py                 # eight one-call indicators, with caveats
     ├── report_figures.py          # resolve a figure across the four layers
     ├── dtm_files.py               # read a downloaded DTM workbook
     ├── dtm_client.py              # DTM v3 API + catalogue browse/download
-    ├── hapi_client.py             # ... one file per source, 16 in total
+    ├── worldpop_client.py         # gridded population: list, download, sum near a site
+    ├── hapi_client.py             # ... one file per source, 17 in total
     └── config.py                  # endpoints, credential resolution, CSV writing
 
 references/                        # lookup tables and API notes, versioned
@@ -233,12 +236,40 @@ SECURITY.md                        # credentials, downloaded content, personal d
 | World Bank | Development indicators | Public |
 | GDACS | Disaster alerts | Public |
 | DTM/IOM | Displacement tracking: v3 API, catalogue (2,375 datasets), data files | Public |
+| WorldPop | Gridded population, 100 m and 1 km, 2015-2030, total and by age and sex (GeoTIFF, CC BY 4.0) | Public |
 
-Sixteen clients covering seventeen sources (DTM has two: its v3 API and its
+Seventeen clients covering eighteen sources (DTM has two: its v3 API and its
 dataset portal), and all of them are in this repo. The ones marked Public need no
 registration; the others need a free key you request from the provider. Nothing
 here ships a key: credentials are read from the environment or from your OS
 keychain, and `.env` is gitignored.
+
+## Gridded population: what it is not
+
+`worldpop_client.py` gives people per 100 m cell, which is what you need for a
+coverage denominator around a site (`population_near(path, lon, lat, radius_km)`).
+Read its limits before you divide by it:
+
+- **Every year is modelled, none is observed.** WorldPop Global 2 spreads the
+  c.2010 and c.2020 census rounds (US Census Bureau projections or OCHA CODs where a
+  conflict prevented a census) over detected buildings, and scales each national
+  total to the UN World Population Prospects 2024 estimate for 1 January, which is a
+  projection from 2024 on. 2030 is in the catalogue. The 100 m and 1 km files share
+  the same national total (Sudan 2025: 50,849,352).
+- **It does not see displacement.** The release statement says so: forced
+  displacement and seasonal mobility are not captured. In Sudan, the map does not
+  show where people went after April 2023. For displaced people, use DTM, and do
+  not add DTM figures to a gridded total: they may already be counted in it.
+- **"Constrained" means people are placed only on detected buildings** (GHSL, Google
+  Open Buildings v3, Microsoft footprints 2023). A camp built after those footprints
+  can come out empty.
+- **No gridded layer we know of measures displacement either.** Meta's HRSL excludes
+  Sudan, South Sudan and Somalia on HDX. Populace (IHME, Planet, Microsoft, 40 m,
+  quarterly) is also driven by buildings: it can show a camp growing, but people
+  leaving intact neighbourhoods, or moving in with host families, change no
+  building. It also requires an account, its downloads stop three quarters before
+  its map (2025q2 against 2026q1 in October 2026), and the IHME non-commercial
+  agreement it points to forbids redistribution, which is why it has no client here.
 
 ## Performance notes
 
@@ -256,7 +287,7 @@ keychain, and `.env` is gitignored.
 
 One motivation behind this project: making the disability data gap measurable.
 
-Humanitarian data systems rarely include disability as a disaggregation variable. Of the 17 sources we query, only two carry it at all: HDX HAPI's `humanitarian-needs` endpoint gives counts of people in need with a disability (a `category` value, not a dedicated field, in HAPI v2), and ACAPS qualifies incidents. Even HAPI returns no disability row for some countries.
+Humanitarian data systems rarely include disability as a disaggregation variable. Of the 18 sources we query, only two carry it at all: HDX HAPI's `humanitarian-needs` endpoint gives counts of people in need with a disability (a `category` value, not a dedicated field, in HAPI v2), and ACAPS qualifies incidents. Even HAPI returns no disability row for some countries.
 
 This is not because persons with disabilities are absent from these crises. It is because data systems do not systematically collect this information. That gap matters for advocacy.
 

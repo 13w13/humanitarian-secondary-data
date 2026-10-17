@@ -36,6 +36,8 @@ SUITES = {
     'p0': ('test_p0_e2e',
            'Non-regression des correctifs P0 de la revue de juillet 2026'),
     # Lent (~4 min, beaucoup d'API reelles) : ne PAS l'inclure par defaut.
+    'worldpop': ('test_worldpop',
+                 'Population maillee WorldPop R2025A : catalogue, age-sexe, raster (~5 s)'),
     'skill50': ('test_skill_50',
                 '50 situations du skill : chiffres, analyse, dispo, exploration, accompagnement'),
 }
@@ -51,7 +53,7 @@ def main(argv):
     # Par defaut : les suites RAPIDES. skill50 (~4 min) se demande explicitement.
     # `hard` d'abord : elle ne touche pas le reseau, donc si elle casse le probleme
     # est chez nous, et il est inutile d'attendre 90 s d'appels API pour le voir.
-    wanted = [a for a in argv if not a.startswith('-')] or ['hard', 'dtm', 'p0']
+    wanted = [a for a in argv if not a.startswith('-')] or ['hard', 'dtm', 'p0', 'worldpop']
     unknown = [w for w in wanted if w not in SUITES]
     if unknown:
         print('Suite(s) inconnue(s) : {}. Disponibles : {}'.format(

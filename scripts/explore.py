@@ -92,6 +92,21 @@ def explore(iso3, topic='dtm'):
     except Exception as e:
         print('  resolveur indisponible : {}'.format(str(e)[:70]))
 
+    # Population maillee : un appel REST, rien ecrit. Les annees ne sont pas des
+    # dates d'observation, et la couche ne voit pas le deplacement : on le dit ici.
+    name = 'E. Population maillee'
+    try:
+        from worldpop_client import WorldPopClient
+        wp = WorldPopClient().freshness(iso3)
+        if wp['available']:
+            print('  {:26} WorldPop {} publie le {}, annees {}-{} MODELISEES'.format(
+                name, wp['release'], wp['published'], wp['first_year'], wp['last_year']))
+            print('  {:26} (ne voit pas le deplacement : pour les deplaces, DTM)'.format(''))
+        else:
+            print('  {:26} {}'.format(name, wp['note']))
+    except Exception as e:
+        print('  {:26} indisponible : {}'.format(name, str(e)[:44]))
+
     hr('3. LE DERNIER CHIFFRE, CITE')
     if dossier and dossier.get('citable'):
         for c in dossier['citable'][:2]:
@@ -125,7 +140,7 @@ def explore(iso3, topic='dtm'):
     if dossier:
         for cav in dossier.get('caveats', [])[:4]:
             print('  - {}'.format(cav[:160]))
-    print('  - Handicap : 2 sources sur 17 seulement en portent (HAPI pour les')
+    print('  - Handicap : 2 sources seulement en portent (HAPI pour les')
     print('    effectifs, ACAPS pour la qualification des incidents). Verifier')
     print('    HAPI humanitarian-needs avant de conclure a une absence.')
 
@@ -133,9 +148,11 @@ def explore(iso3, topic='dtm'):
     print('  telecharger un fichier   : DTMClient().download_dataset(row, dest)')
     print('  lire un fichier          : dtm_files.describe / read_sheet / checksum')
     print('  analyse d\'une crise      : report_figures.analytical_findings(iso3)')
+    print('  population maillee       : WorldPopClient().list_files(iso3), download,')
+    print('                             population_near (rasterio requis)')
     print('  toutes les sources       : python -X utf8 scripts/fetch_country_data.py {}'
           .format(iso3))
-    print('  etat des 17 sources      : python -X utf8 scripts/health_check.py {}'
+    print('  etat des sources         : python -X utf8 scripts/health_check.py {}'
           .format(iso3))
     print()
     print('  ({:.0f} secondes)'.format(time.time() - t0))
