@@ -35,9 +35,9 @@ SUITES = {
             'Catalogue DTM, lecture de fichiers, somme de controle, resolveur'),
     'p0': ('test_p0_e2e',
            'Non-regression des correctifs P0 de la revue de juillet 2026'),
-    # Lent (~4 min, beaucoup d'API reelles) : ne PAS l'inclure par defaut.
     'worldpop': ('test_worldpop',
                  'Population maillee WorldPop R2025A : catalogue, age-sexe, raster (~5 s)'),
+    # Lent (~4 min, beaucoup d'API reelles) : ne PAS l'inclure par defaut.
     'skill50': ('test_skill_50',
                 '50 situations du skill : chiffres, analyse, dispo, exploration, accompagnement'),
 }
