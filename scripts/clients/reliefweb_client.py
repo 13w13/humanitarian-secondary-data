@@ -16,17 +16,39 @@ if hasattr(sys.stdout, 'reconfigure'):   # absent in Jupyter, IDLE, captured out
     sys.stdout.reconfigure(encoding='utf-8')
 
 import json
+import re
 import time
+from datetime import date
 from urllib.error import HTTPError
 from urllib.parse import urlencode
 from urllib.request import Request, urlopen
 
 from config import (
     RELIEFWEB_BASE, RELIEFWEB_APPNAME, RELIEFWEB_APPNAME_HELP, MissingCredential,
-    DEFAULT_TIMEOUT, RATE_LIMIT_DELAY, USER_AGENT, get_credential)
+    DEFAULT_TIMEOUT, RATE_LIMIT_DELAY, USER_AGENT, get_credential, raise_unavailable)
 
 
 MAX_PAGES = 40      # per listing: 40 x limit rows at most
+
+# A ReliefWeb epidemic still "ongoing" this long after it started is flagged: the
+# editors do not always close disaster pages ("DR Congo: Cholera and Measles
+# Outbreaks - 2013-2026" was ongoing on 2026-11-19, as were Somalia 2016 pages).
+STALE_EPIDEMIC_DAYS = 730
+
+
+def parse_disaster_name(name):
+    """Disease part of a ReliefWeb disaster name. No network: testable.
+
+    'Sudan: Cholera Outbreak - Aug 2024' -> 'Cholera'; 'DR Congo: Cholera and Measles
+    Outbreaks - 2013-2026' -> 'Cholera and Measles'; 'South Sudan: Measles - Dec 2022'
+    -> 'Measles'. The wording is ReliefWeb's, not a harmonised disease name.
+    """
+    text = str(name or '').strip()
+    if ': ' in text:
+        text = text.split(': ', 1)[1]
+    if ' - ' in text:
+        text = text.rsplit(' - ', 1)[0]
+    return re.sub(r'\s+outbreaks?$', '', text.strip(), flags=re.I).strip()
 
 
 class ReliefWebClient:
@@ -231,6 +253,106 @@ class ReliefWebClient:
                 break
             time.sleep(RATE_LIMIT_DELAY)
         return reports
+
+    # ── Epidemics (disasters of type EP) ───────────────────
+
+    def ongoing_epidemics(self, iso3=None, statuses=('ongoing', 'alert'), limit=200):
+        """Epidemic disaster pages (type EP), newest start first.
+
+        `iso3` filters on `country.iso3`, which is inclusive: a multi-country page
+        ('Central/Eastern Africa: Ebola Outbreak - May 2026', primary COD) is listed
+        for KEN, NGA and UGA too. Pass statuses=('ongoing', 'alert', 'past') for the
+        history. `stale` flags an ongoing page opened more than STALE_EPIDEMIC_DAYS
+        ago: ReliefWeb does not always close its pages, so "ongoing" is the
+        editors' last word, not a confirmation that the outbreak is active.
+        """
+        conditions = [{'field': 'type.code', 'value': 'EP'},
+                      {'field': 'status', 'value': list(statuses), 'operator': 'OR'}]
+        if iso3:
+            conditions.append({'field': 'country.iso3', 'value': str(iso3).lower()})
+        rows, offset, today = [], 0, date.today()
+        while True:
+            try:
+                resp = self._post('disasters', {
+                    'filter': {'operator': 'AND', 'conditions': conditions},
+                    'fields': {'include': ['name', 'status', 'date.event', 'date.created',
+                                           'country.iso3', 'primary_country.iso3',
+                                           'glide', 'url']},
+                    'sort': ['date.event:desc'], 'limit': limit, 'offset': offset})
+            except MissingCredential:
+                raise
+            except Exception as e:  # noqa: BLE001 - outage -> SourceUnavailable
+                raise_unavailable('ReliefWeb disasters', e)
+            data = resp.get('data', [])
+            for item in data:
+                f = item.get('fields', {})
+                start = str((f.get('date') or {}).get('event') or '')[:10]
+                status = f.get('status', '')
+                try:
+                    open_days = (today - date(*map(int, start.split('-')))).days
+                except (TypeError, ValueError):
+                    open_days = None
+                live = status in ('ongoing', 'alert')
+                rows.append({
+                    'disease': parse_disaster_name(f.get('name')),
+                    'name': f.get('name', ''),
+                    'iso3': ';'.join(str(c.get('iso3') or '').upper()
+                                     for c in f.get('country') or []),
+                    'primary_iso3': str((f.get('primary_country') or {}).get('iso3')
+                                        or '').upper(),
+                    'date_start': start,
+                    'date_created': str((f.get('date') or {}).get('created') or '')[:10],
+                    'status': status,
+                    'open_days': open_days if live else None,
+                    'stale': bool(live and open_days is not None
+                                  and open_days > STALE_EPIDEMIC_DAYS),
+                    'glide': f.get('glide', ''),
+                    'url': f.get('url', ''),
+                })
+            offset += limit
+            if len(data) < limit or offset >= resp.get('totalCount', 0) \
+                    or offset >= limit * MAX_PAGES:
+                break
+            time.sleep(RATE_LIMIT_DELAY)
+        return rows
+
+    def get_source_reports(self, source_shortname, iso3=None, date_from=None, limit=50):
+        """Reports of one source (e.g. 'Africa CDC'), newest first, one page.
+
+        `iso3` filters on `country.iso3` (inclusive: a weekly report tags every
+        country it covers). Africa CDC has no API of its own: its Epidemic
+        Intelligence Weekly Report reaches machines through this listing, a few
+        days after africacdc.org.
+        """
+        conditions = [{'field': 'source.shortname', 'value': source_shortname}]
+        if iso3:
+            conditions.append({'field': 'country.iso3', 'value': str(iso3).lower()})
+        if date_from:
+            conditions.append({'field': 'date.created',
+                               'value': {'from': '{}T00:00:00+00:00'.format(date_from)}})
+        try:
+            resp = self._post('reports', {
+                'filter': {'operator': 'AND', 'conditions': conditions},
+                'fields': {'include': ['title', 'date.created', 'format.name',
+                                       'country.iso3', 'url']},
+                'sort': ['date.created:desc'], 'limit': limit})
+        except MissingCredential:
+            raise
+        except Exception as e:  # noqa: BLE001 - outage -> SourceUnavailable
+            raise_unavailable('ReliefWeb reports ({})'.format(source_shortname), e)
+        out = []
+        for item in resp.get('data', []):
+            f = item.get('fields', {})
+            formats = f.get('format') or []
+            out.append({
+                'title': f.get('title', ''),
+                'date': str((f.get('date') or {}).get('created') or '')[:10],
+                'format': formats[0].get('name', '') if formats else '',
+                'iso3': ';'.join(str(c.get('iso3') or '').upper()
+                                 for c in f.get('country') or []),
+                'url': f.get('url', ''),
+            })
+        return out
 
 
 # ── Standalone test ─────────────────────────────────────────

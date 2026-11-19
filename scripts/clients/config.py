@@ -75,6 +75,29 @@ WORLDPOP_RELEASE = 'R2025A'
 # Public, no auth, CC BY 4.0. Gridded population (GeoTIFF), 100 m and 1 km,
 # annual 2015-2030, total and age/sex. Files on data.worldpop.org.
 
+# ─── WHO Disease Outbreak News (DON) ─────────────────────
+# Public, no auth. Sitefinity OData feed behind who.int/emergencies/disease-outbreak-news.
+# Countries live in a field the default answer hides, `regionscountries` (taxonomy
+# GUIDs), resolved through the WHO country taxonomy below (`Name` = lower-case ISO3).
+WHO_DON_BASE = 'https://www.who.int/api/news/diseaseoutbreaknews'
+WHO_TAXA_BASE = 'https://www.who.int/api/default/hierarchy-taxa'
+WHO_COUNTRY_TAXONOMY_ID = '4203fe2b-f1ae-496d-9bd0-676719f66819'
+WHO_DON_PAGE_URL = 'https://www.who.int/emergencies/disease-outbreak-news/item/{}'
+WHO_DON_CULTURE = 'en'      # the 'fr' feed stopped in June 2024
+WHO_DON_PAGE_SIZE = 100     # server cap: $top above 100 answers HTTP 400
+WHO_DON_MAX_PAGES = 20      # 2,000 notices; the whole feed is ~3,200 (1996-2026)
+WHO_DON_DEFAULT_DAYS = 365  # window of for_country() when `since` is not given
+WHO_DON_SUMMARY_CHARS = 500
+
+# ─── WHO weekly cholera (global cholera and AWD dashboard) ─
+# Public ArcGIS FeatureServer behind WHO's dashboard, weekly cases and deaths by
+# country since 2023. ArcGIS Online item c9a948c432b84a899a5ec39fd57753b8: if the
+# service moves (WHO also publishes `_view` copies), read its `url` there.
+# No licence on the item; the HDX copy of the same data says CC BY-IGO.
+WHO_CHOLERA_FEATURESERVER = ('https://services.arcgis.com/5T5nSi527N4F7luB/arcgis/rest/'
+                             'services/cholera_adm0_week/FeatureServer/0')
+WHO_CHOLERA_ITEM_ID = 'c9a948c432b84a899a5ec39fd57753b8'
+
 # ─── API Keys — keyring (preferred) or env vars ─────────
 # Convention: keyring service = sds.{provider}, username = field name
 #
@@ -382,6 +405,7 @@ EXPECTED_SPARSE = {
     'tags',              # ACLED: sparse by design
     'picture',           # Liveuamap: most events have none
     'date_end',          # open-ended reference periods
+    'regions_named',     # WHO DON: most notices carry country tags only
     'note', 'notes',
 }
 

@@ -6,9 +6,10 @@ Writes CSVs to {ISO3}_data/raw/ and {ISO3}_data/catalogue/, plus two indexes:
 fetch_summary.csv (one row per source with its status) and data_inventory.csv
 (one row per file).
 
-Sources (17): ReliefWeb, HDX HAPI, HDX CKAN, IDMC, UNHCR, INFORM, WFP HungerMap,
+Sources (19): ReliefWeb, HDX HAPI, HDX CKAN, IDMC, UNHCR, INFORM, WFP HungerMap,
          World Bank, ACLED, ACAPS, DTM (HDX), GDACS, HPC/FTS, IFRC GO,
-         IMPACT/REACH, DTM portal, Liveuamap. ACLED, ACAPS and IDMC need a free key.
+         IMPACT/REACH, DTM portal, Liveuamap, WorldPop, WHO Disease Outbreak News.
+         ACLED, ACAPS and IDMC need a free key.
 
 Every source ends in one status: ok, empty, partial, unavailable, error, skipped
 or not_covered. A failed source is never reported as zero records of data.
@@ -49,7 +50,7 @@ ALL_SOURCES = [
     'reliefweb', 'hapi', 'hdx', 'idmc', 'unhcr', 'inform',
     'wfp', 'worldbank', 'acled', 'acaps', 'dtm',
     'gdacs', 'hpc', 'ifrcgo', 'impact', 'dtm_portal',
-    'liveuamap', 'worldpop',
+    'liveuamap', 'worldpop', 'who_don',
 ]
 
 SCRIPT_DIR = os.path.dirname(os.path.abspath(__file__))
@@ -75,6 +76,7 @@ SOURCE_CATEGORIES = {
     'dtm_portal': 'catalogue',
     'liveuamap': 'raw',
     'worldpop': 'catalogue',   # GeoTIFF listing; the rasters are downloaded on demand
+    'who_don': 'raw',          # outbreak notices (alerts), like GDACS
 }
 
 CATALOGUE_SOURCES = {k for k, v in SOURCE_CATEGORIES.items() if v == 'catalogue'}
@@ -94,6 +96,7 @@ SOURCE_DISPLAY_NAMES = {
     'dtm_portal': 'DTM Portal',
     'liveuamap': 'Liveuamap',
     'worldpop': 'WorldPop',
+    'who_don': 'WHO DON',
 }
 
 
@@ -288,6 +291,7 @@ SOURCE_FILES = {
     'dtm_portal': ['dtm_portal_datasets.csv'],
     'liveuamap': ['liveuamap_events.csv'],
     'worldpop': ['worldpop_files.csv'],
+    'who_don': ['who_don_alerts.csv', 'who_don_regional.csv'],
 }
 FILE_OWNER = {f: src for src, names in SOURCE_FILES.items() for f in names}
 
@@ -1445,6 +1449,60 @@ def fetch_worldpop(iso3, output_dir):
     )
 
 
+WHO_DON_FIELDS = ['published', 'title', 'disease', 'countries_named', 'iso3_named',
+                  'regions_named', 'scope', 'match_basis', 'don_id', 'url', 'summary',
+                  'last_modified', 'location_in_title', 'tags_unresolved']
+
+
+def fetch_who_don(iso3, output_dir, date_from=None):
+    """WHO Disease Outbreak News notices concerning the country (default: last 365 days).
+
+    Alerts, not counts: official notifications under the IHR, published with a
+    delay (CAVEATS[0] goes into the note). A country WHO covers but did not tag in
+    the window ends `empty` with the reason (NoNoticeInWindow); an ISO3 absent from
+    the WHO taxonomy ends `not_covered`.
+    """
+    from who_don_client import WHODONClient, CAVEATS, NoNoticeInWindow
+    don = WHODONClient()
+    errors = []
+    print('\n--- WHO Disease Outbreak News ---')
+    rows = _attempt(errors, 'WHO DON', don.for_country, iso3, since=date_from)
+    absent = [e for _, e in errors if isinstance(e, NoNoticeInWindow)]
+    errors = [(label, e) for label, e in errors if not isinstance(e, NoNoticeInWindow)]
+    meta = don.last_meta or {}
+    files = []
+    if rows:
+        save_csv(rows, os.path.join(output_dir, 'who_don_alerts.csv'), WHO_DON_FIELDS)
+        files.append('who_don_alerts.csv')
+        print('  Notices since {}: {} ({} by WHO tag, {} by title)'.format(
+            meta.get('since'), len(rows), meta.get('by_tag'), meta.get('by_title')))
+    # Regional and global notices of the window that name no country: written in
+    # both outcomes, because they are what is left to read when NotCovered is raised
+    # (Sudan: the 2025 multi-country cholera notice, tagged Global). No column audit:
+    # their country columns are empty by definition.
+    regional = meta.get('regional_notices') or []
+    if regional:
+        save_csv(regional, os.path.join(output_dir, 'who_don_regional.csv'),
+                 WHO_DON_FIELDS, audit=False)
+        files.append('who_don_regional.csv')
+    note = ''
+    if meta.get('since'):          # also set when the client raised NotCovered
+        diseases = len({r['disease'].lower() for r in rows or []})
+        note = ('{} notices since {} ({} distinct disease titles: updates repeat them); '
+                '{} regional or global notices name no country{}. {}'.format(
+                    len(rows or []), meta['since'], diseases, len(regional),
+                    ', read them in who_don_regional.csv' if regional else '',
+                    CAVEATS[0]))
+    if absent:      # covered, nothing tagged: an answer, kept out of `errors`
+        note = '{} | {}'.format(str(absent[0]).split(' Basis:')[0], note)
+    p_from, p_to = _extract_date_range(rows, 'published') if rows else ('', '')
+    return _make_result(
+        source='WHO DON', category='raw',
+        total_records=len(rows or []), disability_records=0,
+        period_from=p_from, period_to=p_to, files=files, note=note, errors=errors,
+    )
+
+
 def _iso_date(value):
     """argparse type: a YYYY-MM-DD date, kept as the string the clients expect.
 
@@ -1473,7 +1531,7 @@ def main():
     parser.add_argument('iso3', help='ISO3 country code (e.g., LBN, SDN, SYR)')
     parser.add_argument('--date-from', type=_iso_date,
                         help='Start date YYYY-MM-DD (ReliefWeb, HAPI, IDMC, UNHCR, '
-                             'ACLED, GDACS, HPC flows year, Liveuamap)')
+                             'ACLED, GDACS, HPC flows year, Liveuamap, WHO DON)')
     parser.add_argument('--date-to', type=_iso_date,
                         help='End date YYYY-MM-DD (ReliefWeb, HAPI, ACLED, Liveuamap)')
     parser.add_argument('--skip-hdx', action='store_true', help='Skip HDX CKAN search')
@@ -1573,6 +1631,7 @@ def main():
         'dtm_portal': lambda: fetch_dtm_portal(iso3, catalogue_dir),
         'liveuamap': lambda: fetch_liveuamap(iso3, output_dir, df, dt, mp),
         'worldpop': lambda: fetch_worldpop(iso3, catalogue_dir),
+        'who_don': lambda: fetch_who_don(iso3, output_dir, df),
     }
 
     for source in sources:

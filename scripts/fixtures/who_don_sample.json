@@ -1,0 +1,395 @@
+{
+ "_note": "Recorded from the public WHO API (no key): https://www.who.int/api/news/diseaseoutbreaknews and https://www.who.int/api/default/hierarchy-taxa. Trimmed with $select, summaries cut to 14 words. Used offline by test_hardening (section 12). Re-record: scripts/fixtures/record_who_don_fixture.py",
+ "taxa": [
+  {
+   "Id": "f32a01f7-a795-403c-a961-0416c63066f3",
+   "Title": "African Region (AFRO)",
+   "Name": "african-region-(afro)",
+   "Description": "",
+   "FullUrl": "/afro",
+   "ParentId": "00000000-0000-0000-0000-000000000000"
+  },
+  {
+   "Id": "6b64b787-ab26-49a4-a29e-08d24d367a05",
+   "Title": "South-East Asia Region (SEARO)",
+   "Name": "south-east-asia-region-(searo)",
+   "Description": "",
+   "FullUrl": "/searo",
+   "ParentId": "00000000-0000-0000-0000-000000000000"
+  },
+  {
+   "Id": "1c8e9fa9-fd11-40bb-bf06-0ca52d115683",
+   "Title": "European Region (EURO)",
+   "Name": "european-region-(euro)",
+   "Description": "",
+   "FullUrl": "/euro",
+   "ParentId": "00000000-0000-0000-0000-000000000000"
+  },
+  {
+   "Id": "66325457-5a1e-46ed-a93c-17400be36632",
+   "Title": "Germany",
+   "Name": "germany",
+   "Description": "Member State",
+   "FullUrl": "/euro/germany",
+   "ParentId": "1c8e9fa9-fd11-40bb-bf06-0ca52d115683"
+  },
+  {
+   "Id": "8301988e-e05c-43c1-8588-232fb27654d0",
+   "Title": "Israel",
+   "Name": "isr",
+   "Description": "Member State",
+   "FullUrl": "/euro/israel",
+   "ParentId": "1c8e9fa9-fd11-40bb-bf06-0ca52d115683"
+  },
+  {
+   "Id": "c66558ce-c652-4132-8846-32168dc47b54",
+   "Title": "Global",
+   "Name": "global",
+   "Description": "",
+   "FullUrl": "/global",
+   "ParentId": "00000000-0000-0000-0000-000000000000"
+  },
+  {
+   "Id": "a3552d46-74f3-4eca-a8aa-357b23c2cc75",
+   "Title": "Iraq",
+   "Name": "irq",
+   "Description": "Member State",
+   "FullUrl": "/emro/iraq",
+   "ParentId": "065340c6-6a10-4a9e-b93c-3c8638ec3fc4"
+  },
+  {
+   "Id": "d820ad7d-1741-4b7e-bf6a-391fe7baa577",
+   "Title": "South Sudan",
+   "Name": "ssd",
+   "Description": "Member State",
+   "FullUrl": "/afro/south-sudan",
+   "ParentId": "f32a01f7-a795-403c-a961-0416c63066f3"
+  },
+  {
+   "Id": "065340c6-6a10-4a9e-b93c-3c8638ec3fc4",
+   "Title": "Eastern Mediterranean Region (EMRO)",
+   "Name": "eastern-mediterranean-region-(emro)",
+   "Description": "",
+   "FullUrl": "/emro",
+   "ParentId": "00000000-0000-0000-0000-000000000000"
+  },
+  {
+   "Id": "8026b51f-a65f-4cec-8287-408360c62493",
+   "Title": "India",
+   "Name": "ind",
+   "Description": "Member State",
+   "FullUrl": "/searo/india",
+   "ParentId": "6b64b787-ab26-49a4-a29e-08d24d367a05"
+  },
+  {
+   "Id": "b393fdae-fa71-41b7-8cf9-4f33e0d50ce6",
+   "Title": "Region of the Americas (PAHO)",
+   "Name": "region-of-the-americas-(paho)",
+   "Description": "",
+   "FullUrl": "/paho",
+   "ParentId": "00000000-0000-0000-0000-000000000000"
+  },
+  {
+   "Id": "e482d592-8b0c-465b-a948-55d0aebcd520",
+   "Title": "Congo",
+   "Name": "cog",
+   "Description": "Member State",
+   "FullUrl": "/afro/congo",
+   "ParentId": "f32a01f7-a795-403c-a961-0416c63066f3"
+  },
+  {
+   "Id": "efb17dee-87bf-4f2d-abfa-69f46b84b2e5",
+   "Title": "Democratic Republic of the Congo",
+   "Name": "cod",
+   "Description": "Member State",
+   "FullUrl": "/afro/democratic-republic-of-the-congo",
+   "ParentId": "f32a01f7-a795-403c-a961-0416c63066f3"
+  },
+  {
+   "Id": "62cb8fc8-f91b-49be-a8e3-84bf0603f08b",
+   "Title": "Switzerland",
+   "Name": "che",
+   "Description": "Member State",
+   "FullUrl": "/euro/switzerland",
+   "ParentId": "1c8e9fa9-fd11-40bb-bf06-0ca52d115683"
+  },
+  {
+   "Id": "fbba8f7e-b8ff-4177-9030-88f0bfb4ee7f",
+   "Title": "Kenya ",
+   "Name": "ken",
+   "Description": "Member State",
+   "FullUrl": "/afro/kenya-",
+   "ParentId": "f32a01f7-a795-403c-a961-0416c63066f3"
+  },
+  {
+   "Id": "b917786e-9977-4c6a-9ce7-9ad4d080b790",
+   "Title": "Uganda",
+   "Name": "uga",
+   "Description": "Member State",
+   "FullUrl": "/afro/uganda",
+   "ParentId": "f32a01f7-a795-403c-a961-0416c63066f3"
+  },
+  {
+   "Id": "56cb9fa0-8062-4ce6-b7a9-a04921c8346d",
+   "Title": "Sudan",
+   "Name": "sdn",
+   "Description": "Member State",
+   "FullUrl": "/emro/sudan",
+   "ParentId": "065340c6-6a10-4a9e-b93c-3c8638ec3fc4"
+  },
+  {
+   "Id": "dfffa7d3-3921-413b-8e4e-d99b46d98099",
+   "Title": "France",
+   "Name": "fra",
+   "Description": "Member State",
+   "FullUrl": "/euro/france",
+   "ParentId": "1c8e9fa9-fd11-40bb-bf06-0ca52d115683"
+  },
+  {
+   "Id": "7eaed2b5-61e5-440d-845a-da7d8762617e",
+   "Title": "Nigeria",
+   "Name": "nga",
+   "Description": "Member State",
+   "FullUrl": "/afro/nigeria",
+   "ParentId": "f32a01f7-a795-403c-a961-0416c63066f3"
+  },
+  {
+   "Id": "cb48f725-8aa6-4600-aa8b-db362add150a",
+   "Title": "Saudi Arabia",
+   "Name": "sau",
+   "Description": "Member State",
+   "FullUrl": "/emro/saudi-arabia",
+   "ParentId": "065340c6-6a10-4a9e-b93c-3c8638ec3fc4"
+  },
+  {
+   "Id": "9df902cb-a01a-42d4-9d30-de6b9f688062",
+   "Title": "Guinea",
+   "Name": "gin",
+   "Description": "Member State",
+   "FullUrl": "/afro/guinea",
+   "ParentId": "f32a01f7-a795-403c-a961-0416c63066f3"
+  },
+  {
+   "Id": "a1bb3725-0a25-4e48-99e5-e186bb882e9f",
+   "Title": "Qatar",
+   "Name": "qat",
+   "Description": "Member State",
+   "FullUrl": "/emro/qatar",
+   "ParentId": "065340c6-6a10-4a9e-b93c-3c8638ec3fc4"
+  },
+  {
+   "Id": "1a86f5fc-aeca-426a-983c-f45cbcb3e100",
+   "Title": "Western pacific Region (WPRO)",
+   "Name": "western-pacific-region-(wpro)",
+   "Description": "",
+   "FullUrl": "/wpro",
+   "ParentId": "00000000-0000-0000-0000-000000000000"
+  }
+ ],
+ "notices": [
+  {
+   "Id": "efe970a7-b2ce-4904-89bc-d792a4624ae4",
+   "LastModified": "2026-11-17T16:33:06Z",
+   "UrlName": "2026-DON627",
+   "Summary": "On 4 November 2026, health authorities in the canton of Ticino, Switzerland, in coordination ...",
+   "regionscountries": [
+    "62cb8fc8-f91b-49be-a8e3-84bf0603f08b"
+   ],
+   "PublicationDateAndTime": "2026-11-17T19:00:00Z",
+   "Title": "Chikungunya virus disease - Switzerland",
+   "DonId": "2026-DON627"
+  },
+  {
+   "Id": "ee6cef15-98b8-4e07-b49a-f9c64c82a380",
+   "LastModified": "2026-11-17T15:43:30Z",
+   "UrlName": "2026-DON626",
+   "Summary": "On 29 October 2026, the National International Health Regulations (IHR) Focal Point of the ...",
+   "regionscountries": [
+    "a1bb3725-0a25-4e48-99e5-e186bb882e9f"
+   ],
+   "PublicationDateAndTime": "2026-11-13T19:00:00Z",
+   "Title": "Middle East respiratory syndrome (MERS) – Qatar",
+   "DonId": "2026-DON626"
+  },
+  {
+   "Id": "bfeabe5e-7ba7-40e4-aba0-ba714110cc21",
+   "LastModified": "2026-11-06T20:54:21Z",
+   "UrlName": "2026-DON625",
+   "Summary": "Since the publication of the previous Disease Outbreak News on 23 October 2026, the ...",
+   "regionscountries": [
+    "efb17dee-87bf-4f2d-abfa-69f46b84b2e5",
+    "fbba8f7e-b8ff-4177-9030-88f0bfb4ee7f",
+    "7eaed2b5-61e5-440d-845a-da7d8762617e"
+   ],
+   "PublicationDateAndTime": "2026-11-06T20:42:12Z",
+   "Title": "Ebola disease caused by Bundibugyo virus, Democratic Republic of the Congo, Kenya and Nigeria",
+   "DonId": "2026-DON625"
+  },
+  {
+   "Id": "ed87efed-9b8e-492e-ad7d-1e1e22e9f77b",
+   "LastModified": "2026-11-06T14:45:20Z",
+   "UrlName": "2026-DON624",
+   "Summary": "Yellow fever transmission continues in the WHO African Region, with recent outbreak activity concentrated ...",
+   "regionscountries": [
+    "c66558ce-c652-4132-8846-32168dc47b54"
+   ],
+   "PublicationDateAndTime": "2026-11-06T19:00:00Z",
+   "Title": "Yellow fever - WHO African Region",
+   "DonId": "2026-DON624"
+  },
+  {
+   "Id": "f71dec3a-9f8a-4eb1-810c-baeefc888535",
+   "LastModified": "2026-10-23T17:14:16Z",
+   "UrlName": "2026-DON622",
+   "Summary": "Since the publication of the previous Disease Outbreak News on 8 October 2026, the ...",
+   "regionscountries": [
+    "efb17dee-87bf-4f2d-abfa-69f46b84b2e5",
+    "fbba8f7e-b8ff-4177-9030-88f0bfb4ee7f",
+    "7eaed2b5-61e5-440d-845a-da7d8762617e"
+   ],
+   "PublicationDateAndTime": "2026-10-23T15:03:45Z",
+   "Title": "Ebola disease caused by Bundibugyo virus, Democratic Republic of the Congo, Kenya and Nigeria",
+   "DonId": "2026-DON622"
+  },
+  {
+   "Id": "eafb07ec-9187-4b39-b310-94b99a89571a",
+   "LastModified": "2026-10-16T14:58:58Z",
+   "UrlName": "middle-east-respiratory-syndrome-coronavirus---kingdom-of-saudi-arabia",
+   "Summary": "Between 1 January and 5 October 2026, the Kingdom of Saudi Arabia reported eight ...",
+   "regionscountries": [
+    "cb48f725-8aa6-4600-aa8b-db362add150a"
+   ],
+   "PublicationDateAndTime": "2026-10-15T16:00:00Z",
+   "Title": "Middle East respiratory syndrome coronavirus - Kingdom of Saudi Arabia",
+   "DonId": "2026-DON618"
+  },
+  {
+   "Id": "5df1872c-3aab-4e1b-9d78-475f6ead4040",
+   "LastModified": "2026-10-22T08:00:35Z",
+   "UrlName": "2026-DON621",
+   "Summary": "Since the last Disease Outbreak News was published on 11 September 2026, the Bundibugyo ...",
+   "regionscountries": [
+    "efb17dee-87bf-4f2d-abfa-69f46b84b2e5"
+   ],
+   "PublicationDateAndTime": "2026-09-25T15:16:26Z",
+   "Title": "Ebola disease caused by Bundibugyo virus - Democratic Republic of the Congo",
+   "DonId": "2026-DON621"
+  },
+  {
+   "Id": "a06665c4-2ff2-411b-8767-25e299dac63f",
+   "LastModified": "2026-07-17T17:17:38Z",
+   "UrlName": "2026-DON613",
+   "Summary": "The Bundibugyo virus disease (BVD) outbreak in the Democratic Republic of the Congo remains ...",
+   "regionscountries": [
+    "efb17dee-87bf-4f2d-abfa-69f46b84b2e5",
+    "b917786e-9977-4c6a-9ce7-9ad4d080b790",
+    "dfffa7d3-3921-413b-8e4e-d99b46d98099",
+    "66325457-5a1e-46ed-a93c-17400be36632"
+   ],
+   "PublicationDateAndTime": "2026-07-17T16:13:00Z",
+   "Title": "Ebola disease caused by Bundibugyo virus, Democratic Republic of the Congo & Uganda",
+   "DonId": "2026-DON613"
+  },
+  {
+   "Id": "78881320-515f-4e5c-b5fc-e3d75acf80b1",
+   "LastModified": "2025-11-18T17:18:35Z",
+   "UrlName": "2025-DON581",
+   "Summary": "In 2025, a resurgence of chikungunya virus (CHIKV) disease was noted in a number ...",
+   "regionscountries": [
+    "6b64b787-ab26-49a4-a29e-08d24d367a05",
+    "065340c6-6a10-4a9e-b93c-3c8638ec3fc4",
+    "f32a01f7-a795-403c-a961-0416c63066f3",
+    "b393fdae-fa71-41b7-8cf9-4f33e0d50ce6",
+    "1a86f5fc-aeca-426a-983c-f45cbcb3e100",
+    "1c8e9fa9-fd11-40bb-bf06-0ca52d115683"
+   ],
+   "PublicationDateAndTime": "2025-10-03T11:25:30Z",
+   "Title": "Chikungunya virus disease- Global situation",
+   "DonId": "2025-DON581"
+  },
+  {
+   "Id": "42cc5b42-7a88-4ab6-abab-a078fc0ac0cb",
+   "LastModified": "2025-04-26T10:39:34Z",
+   "UrlName": "2025-DON566",
+   "Summary": "On 26 April 2025, the Ministry of Health (MoH) of Uganda declared the end ...",
+   "regionscountries": [
+    "b917786e-9977-4c6a-9ce7-9ad4d080b790"
+   ],
+   "PublicationDateAndTime": "2025-04-26T18:00:00Z",
+   "Title": "Sudan virus disease – Uganda",
+   "DonId": "2025-DON566"
+  },
+  {
+   "Id": "a6e9601d-d315-4a96-bb79-cd3bcee683a9",
+   "LastModified": "2024-06-11T13:42:25Z",
+   "UrlName": "2024-DON523",
+   "Summary": "On 22 May 2024, the International Health Regulations (IHR) National Focal Point (NFP) for ...",
+   "regionscountries": [
+    "8026b51f-a65f-4cec-8287-408360c62493"
+   ],
+   "PublicationDateAndTime": "2024-06-11T18:00:00Z",
+   "Title": "Avian Influenza A (H9N2)- India",
+   "DonId": "2024-DON523"
+  },
+  {
+   "Id": "d6290ed8-363a-4566-995e-4cefd48dbcfc",
+   "LastModified": "2024-01-24T13:51:10Z",
+   "UrlName": "2023-DON466",
+   "Summary": "On 14 April 2023, the Ministry of Health (MoH) of South Sudan declared an ...",
+   "regionscountries": [
+    "d820ad7d-1741-4b7e-bf6a-391fe7baa577"
+   ],
+   "PublicationDateAndTime": "2023-05-05T11:49:15Z",
+   "Title": "Acute hepatitis E – South Sudan",
+   "DonId": "2023-DON466"
+  },
+  {
+   "Id": "9bac4895-0c80-434d-b46b-13b30087b07b",
+   "LastModified": "2024-01-26T15:57:08Z",
+   "UrlName": "2023-DON362",
+   "Summary": "On 18 December 2022, the IHR National Focal Point for Sudan notified WHO of ...",
+   "regionscountries": [
+    "56cb9fa0-8062-4ce6-b7a9-a04921c8346d"
+   ],
+   "PublicationDateAndTime": "2023-01-12T19:00:00Z",
+   "Title": "Circulating vaccine-derived poliovirus type 2 (cVDPV2) – Sudan",
+   "DonId": "2023-DON362"
+  },
+  {
+   "Id": "c12d3626-05e0-48d7-9ec0-5430cc9248e1",
+   "LastModified": "2024-02-05T11:16:06Z",
+   "UrlName": "2022-DON386",
+   "Summary": "Between 1 January to 22 May 2022, the health authorities of the Republic of ...",
+   "regionscountries": [
+    "a3552d46-74f3-4eca-a8aa-357b23c2cc75"
+   ],
+   "PublicationDateAndTime": "2022-06-01T18:00:00Z",
+   "Title": "Crimean-Congo Hemorrhagic Fever - Iraq",
+   "DonId": "2022-DON386"
+  },
+  {
+   "Id": "80ba7b99-b618-4b9a-9471-bb5a6c890c7e",
+   "LastModified": "2024-02-14T11:19:20Z",
+   "UrlName": "2022-DON366",
+   "Summary": "WHO was notified on 7 March 2022 of the detection of circulating vaccine-derived poliovirus ...",
+   "regionscountries": [
+    "1c8e9fa9-fd11-40bb-bf06-0ca52d115683"
+   ],
+   "PublicationDateAndTime": "2022-04-15T12:50:45Z",
+   "Title": "Circulating vaccine-derived poliovirus type 3 – Israel",
+   "DonId": "2022-DON366"
+  },
+  {
+   "Id": "c880a03c-13ee-4bf6-a6ed-3048e1cf2bbf",
+   "LastModified": "2022-07-28T22:43:11Z",
+   "UrlName": "2019-DON205",
+   "Summary": "",
+   "regionscountries": [
+    "56cb9fa0-8062-4ce6-b7a9-a04921c8346d"
+   ],
+   "PublicationDateAndTime": "2019-11-14T18:00:00Z",
+   "Title": "Rift Valley Fever – Republic of the Sudan",
+   "DonId": "2019-DON205"
+  }
+ ]
+}

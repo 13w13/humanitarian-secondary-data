@@ -135,6 +135,7 @@ The first argument is an **ISO 3166-1 alpha-3 country code** (e.g. `SDN`, `UKR`,
 | **DTM/IOM** | Countries with displacement tracking |
 | **ReliefWeb** | Any country with reports filed |
 | **WorldPop** | All countries and territories (Global 2, release R2025A) |
+| **WHO DON** | Countries WHO tags on its Disease Outbreak News (taxonomy of 229 entries: Member States, territories, regions); default window 365 days |
 
 If a source has no data for the given country, its status says which case it is:
 `empty` (it answered with nothing), `not_covered` (it has no coverage for this
@@ -154,7 +155,8 @@ zero.
 | `--output-dir` | Override output directory | |
 
 Each source applies the period its own way (HPC reads the year of `--date-from`,
-GDACS looks back from today, and HDX, INFORM, WFP, World Bank, ACAPS, DTM, IFRC and
+GDACS looks back from today, WHO DON starts at `--date-from` or 365 days back and
+ignores `--date-to`, and HDX, INFORM, WFP, World Bank, ACAPS, DTM, IFRC and
 IMPACT ignore it); the help text of `fetch_country_data.py` lists which ones use it.
 HAPI keeps every row whose reference period overlaps the window, so the yearly HNO
 counts in August, and a zero says what exists outside it:
@@ -187,6 +189,7 @@ python -X utf8 01b_download.py --dry-run
 
 scripts/
 ├── explore.py                     # → START HERE: orient yourself on a country
+├── epidemic_compare.py            # which source signals which outbreak, since when, and the gaps
 ├── health_check.py                # is each source reachable right now?
 ├── fetch_country_data.py          # engine: all sources → CSVs
 ├── download_catalogue.py          # engine: catalogue → downloaded files
@@ -195,13 +198,16 @@ scripts/
 ├── wgss_probe.py                  # read a workbook's column names, never its values
 ├── run_tests.py                   # test runner (stdlib only, `--list` for the suites)
 ├── test_hardening.py              # the offline suite: run this one first
+├── fixtures/                      # recorded API answers served locally by the offline suite
 └── clients/
     ├── recipes.py                 # eight one-call indicators, with caveats
     ├── report_figures.py          # resolve a figure across the four layers
     ├── dtm_files.py               # read a downloaded DTM workbook
     ├── dtm_client.py              # DTM v3 API + catalogue browse/download
     ├── worldpop_client.py         # gridded population: list, download, sum near a site
-    ├── hapi_client.py             # ... one file per source, 17 in total
+    ├── who_don_client.py          # WHO outbreak notices, attributed by WHO's own country tags
+    ├── who_cholera_client.py      # WHO weekly cholera cases and deaths by country
+    ├── hapi_client.py             # ... one file per source, 19 in total
     └── config.py                  # endpoints, credential resolution, CSV writing
 
 references/                        # lookup tables and API notes, versioned
@@ -237,9 +243,16 @@ SECURITY.md                        # credentials, downloaded content, personal d
 | GDACS | Disaster alerts | Public |
 | DTM/IOM | Displacement tracking: v3 API, catalogue (2,375 datasets), data files | Public |
 | WorldPop | Gridded population, 100 m and 1 km, 2015-2030, total and by age and sex (GeoTIFF, CC BY 4.0) | Public |
+| WHO DON | Disease Outbreak News: official outbreak notices, with WHO's country tags. Alerts to cross-check, not case counts: they go through the Member State under the IHR and come out with a delay | Public |
+| WHO weekly cholera | Cholera cases and deaths reported by country each week since 2023 (the ArcGIS service behind WHO's cholera dashboard), about one month behind | Public |
 
-Seventeen clients covering eighteen sources (DTM has two: its v3 API and its
-dataset portal), and all of them are in this repo. The ones marked Public need no
+Nineteen clients covering twenty sources (DTM has two: its v3 API and its
+dataset portal), and all of them are in this repo. `scripts/epidemic_compare.py`
+puts five of them side by side for outbreaks (ReliefWeb epidemic pages, WHO DON,
+IFRC GO epidemic emergencies and appeals, Africa CDC reports through ReliefWeb, WHO
+weekly cholera) and lists the gaps: on 19 November 2026, Sudan's cholera showed only
+in WHO's weekly series, with no DON tagged Sudan since January 2023 and a ReliefWeb
+page closed since 2023. The ones marked Public need no
 registration; the others need a free key you request from the provider. Nothing
 here ships a key: credentials are read from the environment or from your OS
 keychain, and `.env` is gitignored.
@@ -287,7 +300,7 @@ Read its limits before you divide by it:
 
 One motivation behind this project: making the disability data gap measurable.
 
-Humanitarian data systems rarely include disability as a disaggregation variable. Of the 18 sources we query, only two carry it at all: HDX HAPI's `humanitarian-needs` endpoint gives counts of people in need with a disability (a `category` value, not a dedicated field, in HAPI v2), and ACAPS qualifies incidents. Even HAPI returns no disability row for some countries.
+Humanitarian data systems rarely include disability as a disaggregation variable. Of the 20 sources we query, only two carry it at all: HDX HAPI's `humanitarian-needs` endpoint gives counts of people in need with a disability (a `category` value, not a dedicated field, in HAPI v2), and ACAPS qualifies incidents. Even HAPI returns no disability row for some countries.
 
 This is not because persons with disabilities are absent from these crises. It is because data systems do not systematically collect this information. That gap matters for advocacy.
 

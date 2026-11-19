@@ -160,6 +160,8 @@ class IFRCGoClient:
                 'num_missing': ev.get('num_missing') or 0,
                 'date_start': ev.get('disaster_start_date', ''),
                 'countries': country_names,
+                'countries_iso3': ';'.join(str(c.get('iso3') or '').upper()
+                                           for c in countries if isinstance(c, dict)),
                 'glide': ev.get('glide', ''),
                 # ⚠ IFRC publie en FRANCS SUISSES, pas en dollars. Les colonnes
                 # s'appelaient *_amount_* et etaient lues comme des USD.
@@ -170,8 +172,8 @@ class IFRCGoClient:
 
         return records
 
-    def get_appeals(self, iso3=None, country_id=None, status=None, limit=100):
-        """Get appeals (DREF, Emergency Appeal, etc.).
+    def get_appeals(self, iso3=None, country_id=None, status=None, limit=100, dtype=None):
+        """Get appeals (DREF, Emergency Appeal, etc.). `dtype` as in get_emergencies.
 
         Returns:
             List of appeal dicts: id, name, type, status, amounts, dates.
@@ -194,6 +196,8 @@ class IFRCGoClient:
             params['country__iso3'] = want_iso3
         if status:
             params['status'] = str(status)
+        if dtype:
+            params['dtype'] = str(dtype)
 
         try:
             results = self._paginate('appeal/', params, max_results=limit)
@@ -220,6 +224,10 @@ class IFRCGoClient:
                 'atype': ap.get('atype_display', ''),
                 'status': ap.get('status_display', ''),
                 'country': ap.get('country', {}).get('name', '') if isinstance(ap.get('country'), dict) else '',
+                'country_iso3': str((ap.get('country') or {}).get('iso3') or '').upper()
+                                if isinstance(ap.get('country'), dict) else '',
+                'dtype': (ap.get('dtype') or {}).get('name', '')
+                         if isinstance(ap.get('dtype'), dict) else '',
                 # ⚠ Montants en FRANCS SUISSES (IFRC publie en CHF).
                 'amount_requested_chf': ap.get('amount_requested') or 0,
                 'amount_funded_chf': ap.get('amount_funded') or 0,
@@ -235,6 +243,32 @@ class IFRCGoClient:
             })
 
         return records
+
+    EPIDEMIC_DTYPE = 1     # GO disaster_type 'Epidemic' (list read on 2026-11-19)
+
+    def epidemics(self, iso3=None, since=None, limit=200):
+        """Epidemic emergencies and appeals (DREF, Emergency Appeal), one list.
+
+        Rows: kind ('event' or 'appeal'), name, iso3 (';' when several), date_start,
+        status (appeals: Active/Closed; events have none), atype, code, url. Events
+        are filtered on their start date (`since`, server side); appeals on
+        start_date, client side. A Red Cross response, not a case count: GO lists
+        what National Societies asked support for.
+        """
+        events = self.get_emergencies(iso3=iso3, dtype=self.EPIDEMIC_DTYPE,
+                                      date_from=since, limit=limit)
+        appeals = self.get_appeals(iso3=iso3, dtype=self.EPIDEMIC_DTYPE, limit=limit)
+        rows = [{'kind': 'event', 'name': e['name'], 'iso3': e['countries_iso3'],
+                 'date_start': str(e['date_start'])[:10], 'status': '', 'atype': '',
+                 'code': '', 'url': 'https://go.ifrc.org/emergencies/{}'.format(e['event_id'])}
+                for e in events]
+        rows += [{'kind': 'appeal', 'name': a['name'], 'iso3': a['country_iso3'],
+                  'date_start': str(a['start_date'])[:10], 'status': a['status'],
+                  'atype': a['atype'], 'code': a['code'], 'url': ''}
+                 for a in appeals
+                 if not since or str(a['start_date'])[:10] >= str(since)]
+        rows.sort(key=lambda r: r['date_start'], reverse=True)
+        return rows
 
     def get_field_reports(self, iso3=None, country_id=None, limit=50):
         """Get field reports (situation updates from NS).
