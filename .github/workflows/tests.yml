@@ -19,6 +19,14 @@ jobs:
       matrix:
         os: [ubuntu-latest, windows-latest]
         python: ['3.9', '3.12']
+        # ubuntu-latest became Ubuntu 26.04, where setup-python has no Python 3.9 build
+        # (3.9.25 exists for 22.04 and 24.04 only). Keep testing the 3.9 floor on 24.04.
+        exclude:
+          - os: ubuntu-latest
+            python: '3.9'
+        include:
+          - os: ubuntu-24.04
+            python: '3.9'
     steps:
       - uses: actions/checkout@v4
       - uses: actions/setup-python@v5
